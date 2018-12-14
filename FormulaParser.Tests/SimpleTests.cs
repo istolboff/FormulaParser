@@ -248,8 +248,8 @@ namespace FormulaParser.Tests
         {
             foreach (var booleanFormula in new[]
                 {
-                    new { FormulaText = "|1|~or~|3|>|5|", ExpectedExceptionText = "fooo" },
-                    new { FormulaText = "|8|&&|3.0|==|3|", ExpectedExceptionText = "fooo" },
+                    new { FormulaText = "|1|~or~|3|>|5|", ExpectedExceptionText = "Operator '||' cannot be applied to operands of type 'Int32' and 'System.Boolean'" },
+                    new { FormulaText = "|8.5|&&|3.0|==|3|", ExpectedExceptionText = "Operator '&&' cannot be applied to operands of type 'Decimal' and 'System.Boolean'" }
                 })
             {
                 foreach (var formulaTextWithSpaces in InsertSpacesIntoFormula(booleanFormula.FormulaText))
@@ -284,7 +284,10 @@ namespace FormulaParser.Tests
                 foreach (var formulaTextWithSpaces in InsertSpacesIntoFormula(booleanFormula.FormulaText))
                 {
                     var formula = _testee.Build(formulaTextWithSpaces);
-                    Assert.AreEqual(booleanFormula.ExpectedResult, formula.Apply(DefaultPropertyHolder), $"Formula text: {formulaTextWithSpaces}");
+                    Assert.AreEqual(
+                        booleanFormula.ExpectedResult, 
+                        formula.Apply(DefaultPropertyHolder), 
+                        $"Formula text: {formulaTextWithSpaces}, Expression built: {formula}");
                 }
             }
         }

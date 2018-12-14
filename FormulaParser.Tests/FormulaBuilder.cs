@@ -17,6 +17,7 @@ namespace FormulaParser.Tests
         public Formula(ValueCalculator valueCalculator, ParameterExpression formulaParameter)
         {
             _delegate = Expression.Lambda(valueCalculator.CalculateExpression, formulaParameter).Compile();
+            _expressionText = valueCalculator.ToString();
         }
 
         public object Apply(object parameter = null)
@@ -24,7 +25,13 @@ namespace FormulaParser.Tests
             return _delegate.DynamicInvoke(parameter);
         }
 
+        public override string ToString()
+        {
+            return _expressionText;
+        }
+
         private readonly Delegate _delegate;
+        private readonly string _expressionText;
     }
 
     public class FormulaBuilder
@@ -90,8 +97,8 @@ namespace FormulaParser.Tests
             var parameters = methodInfo.GetParameters();
             if (parameters.Length != parameterCalculators.Count)
             {
-                return Failure<Expression[]>(
-                    new ParsingErrors($"Function {methodInfo.Name} expects {parameters.Length} parameters, {parameterCalculators.Count} provided."));
+                return Failure<Expression[]>(textInput =>
+                    textInput.MakeErrors($"Function {methodInfo.Name} expects {parameters.Length} parameters, {parameterCalculators.Count} provided."));
             }
 
             var parametersConvertedToCorrectTypes = parameters
@@ -109,12 +116,12 @@ namespace FormulaParser.Tests
 
             if (conversionErrors.Any())
             {
-                return Failure<Expression[]>(
+                return Failure<Expression[]>(textInput => 
                     conversionErrors
                         .Skip(1)
                         .Aggregate(
-                            new ParsingErrors(conversionErrors.First(), null),
-                            (errors, error) => new ParsingErrors(error, errors)));
+                            textInput.MakeErrors(conversionErrors.First(), null),
+                            (errors, error) => textInput.MakeErrors(error, errors)));
             }
 
             return Success(
@@ -143,7 +150,7 @@ namespace FormulaParser.Tests
                         (valueCalculatorOrError, pair) =>
                             valueCalculatorOrError.FlatMap(calculator => calculator.TryToApplyBinaryOperator(pair.Link, pair.Right)))
                     .Fold(
-                        error => Failure<ValueCalculator>(new ParsingErrors(error, null)), 
+                        error => Failure<ValueCalculator>(textInput => textInput.MakeErrors(error, null)), 
                         Success);
         }
 
@@ -180,11 +187,11 @@ namespace FormulaParser.Tests
             {
                 return textInput
                         .NextToken()
-                        .FlatMap(tokenText =>
+                        .FlatMap(tokenText => 
                             tryParse(tokenText, out T result)
                                 ? Right<ParsingErrors, T>(result)
                                 : Left<ParsingErrors, T>(
-                                    new ParsingErrors($"Could not parse {typeof(T).Name} from value {tokenText}")));
+                                    textInput.MakeErrors($"Could not parse {typeof(T).Name} from value {tokenText}")));
             };
         }
 
@@ -198,7 +205,7 @@ namespace FormulaParser.Tests
                             expectedLexems.Contains(lexem)
                                 ? Right<ParsingErrors, string>(lexem)
                                 : Left<ParsingErrors, string>(
-                                    new ParsingErrors(
+                                    textInput.MakeErrors(
                                         $"None of expected characters ['{string.Join("', '", expectedLexems)}'] is present")));
             };
         }
@@ -275,6 +282,11 @@ namespace FormulaParser.Tests
                         op.Expression(leftOperand.CalculateExpression, rightOperand.CalculateExpression));
         }
 
+        public override string ToString()
+        {
+            return $"'{ResultType.Name}': {CalculateExpression}";
+        }
+
         private static Either<ParsingError, Type> TryToDeduceResultingType(string operatorChars, Type type1, Type type2)
         {
             var i1 = Array.IndexOf(TypesConversionSequence, type1);
@@ -294,8 +306,8 @@ namespace FormulaParser.Tests
                 { ">=", (Expression.GreaterThanOrEqual, true) },
                 { "==", (Expression.Equal, true) },
                 { "!=", (Expression.NotEqual, true) },
-                { "&&", (Expression.Or, true) },
-                { "||", (Expression.And, true) },
+                { "&&", (Expression.And, true) },
+                { "||", (Expression.Or, true) },
                 { "+", (Expression.Add, false) },
                 { "-", (Expression.Subtract, false) },
                 { "*", (Expression.Multiply, false) },
@@ -329,17 +341,18 @@ namespace FormulaParser.Tests
 
     public sealed class ParsingErrors 
     {
-        public ParsingErrors(string errorMessage)
-            : this(new ParsingError(errorMessage), null)
+        public ParsingErrors(string errorMessage, TextInput errorLocation)
+            : this(new ParsingError(errorMessage), null, errorLocation)
         {
         }
 
-        public ParsingErrors(ParsingError headError, ParsingErrors tailErrors, bool isFatal = false)
+        public ParsingErrors(ParsingError headError, ParsingErrors tailErrors, TextInput errorLocation, bool isFatal = false)
         {
             _headError = headError;
             _tailErrors = tailErrors;
+            _errorLocation = errorLocation;
             IsFatal = isFatal;
-            Trace.WriteLine(ToString());
+            Trace.WriteLine("=========" + ToString());
         }
 
         public bool IsFatal { get; }
@@ -351,12 +364,12 @@ namespace FormulaParser.Tests
 
         public ParsingErrors MakeFatal()
         {
-            return new ParsingErrors(_headError, _tailErrors, true);
+            return new ParsingErrors(_headError, _tailErrors, _errorLocation, true);
         }
 
         public override string ToString()
         {
-            return string.Join(Environment.NewLine, ListErrors(_tailErrors, _headError));
+            return string.Join(Environment.NewLine, ListErrors(_tailErrors, _headError)) + " at " + _errorLocation.ToString();
         }
 
         private static IEnumerable<ParsingError> ListErrors(ParsingErrors errors, ParsingError error)
@@ -373,6 +386,7 @@ namespace FormulaParser.Tests
 
         private readonly ParsingError _headError;
         private readonly ParsingErrors _tailErrors;
+        private readonly TextInput _errorLocation;
     }
 
     public readonly struct TextInput
@@ -385,15 +399,12 @@ namespace FormulaParser.Tests
 
         public bool IsEmpty => _currentPosition == _text.Length;
 
-        public ParsingErrors AsUnparsedInputError() =>
-            new ParsingErrors($"There stil remains unparsed text '{_text.Substring(_currentPosition)}' at the end.");
-
         public ParsingResult<string> NextToken()
         {
             var firstNonSpaceCharPos = SkipLeadingSpaces();
             if (firstNonSpaceCharPos == null)
             {
-                return new ParsingResult<string>(new ParsingErrors("No more tokens in the input."));
+                return new ParsingResult<string>(MakeErrors("No more tokens in the input."));
             }
 
             var operationLexem = TryScanOperationLexem(firstNonSpaceCharPos.Value);
@@ -413,13 +424,13 @@ namespace FormulaParser.Tests
             var firstNonSpaceCharPos = SkipLeadingSpaces();
             if (firstNonSpaceCharPos == null)
             {
-                return new ParsingResult<string>(new ParsingErrors("No more tokens in the input."));
+                return new ParsingResult<string>(MakeErrors("No more tokens in the input."));
             }
 
             var firstTokenChar = _text[firstNonSpaceCharPos.Value];
             if (firstTokenChar != openingQuoteChar)
             {
-                return new ParsingResult<string>(new ParsingErrors($"Expected {openingQuoteChar}."));
+                return new ParsingResult<string>(MakeErrors($"Expected {openingQuoteChar}."));
             }
 
             var tokenLengthOrError = ScanQuotedToken(firstNonSpaceCharPos.Value, closingQuoteChar);
@@ -436,11 +447,24 @@ namespace FormulaParser.Tests
             var firstNonSpaceCharPos = SkipLeadingSpaces();
             if (firstNonSpaceCharPos == null)
             {
-                return new ParsingResult<string>(new ParsingErrors("No more tokens in the input."));
+                return new ParsingResult<string>(MakeErrors("No more tokens in the input."));
             }
 
             return TryScanOperationLexem(firstNonSpaceCharPos.Value) 
-                 ?? new ParsingResult<string>(new ParsingErrors($"Next token is not an operation lexem {SkipTo(firstNonSpaceCharPos.Value)}."));
+                 ?? new ParsingResult<string>(MakeErrors($"Next token is not an operation lexem {SkipTo(firstNonSpaceCharPos.Value)}."));
+        }
+
+        public ParsingErrors AsUnparsedInputError() =>
+            MakeErrors($"There stil remains unparsed text '{_text.Substring(_currentPosition)}' at the end.");
+
+        public ParsingErrors MakeErrors(string errorMessage)
+        {
+            return new ParsingErrors(errorMessage, this);
+        }
+
+        public ParsingErrors MakeErrors(ParsingError headError, ParsingErrors tailErrors)
+        {
+            return new ParsingErrors(headError, tailErrors, this);
         }
 
         public override string ToString()
@@ -460,12 +484,12 @@ namespace FormulaParser.Tests
             var firstNonSpaceCharPos = input.SkipLeadingSpaces();
             if (firstNonSpaceCharPos == null)
             {
-                return new ParsingResult<string>(new ParsingErrors("Identifier expected."));
+                return new ParsingResult<string>(input.MakeErrors("Identifier expected."));
             }
 
             if (!char.IsLetter(input._text[firstNonSpaceCharPos.Value]))
             {
-                return new ParsingResult<string>(new ParsingErrors("The first character of an identifier should be a letter."));
+                return new ParsingResult<string>(input.MakeErrors("The first character of an identifier should be a letter."));
             }
 
             var i = firstNonSpaceCharPos.Value + 1;
@@ -527,7 +551,7 @@ namespace FormulaParser.Tests
                 if (nextQuotePos < 0)
                 {
                     return new ParsingResult<int>(
-                        new ParsingErrors(
+                        MakeErrors(
                             $"Quoted token {_text.Substring(openingQuotePos)} does not have closing {closingQuoteChar} character."));
                 }
 
@@ -540,7 +564,7 @@ namespace FormulaParser.Tests
             }
 
             return new ParsingResult<int>(
-                new ParsingErrors(
+                MakeErrors(
                     $"Quoted token {_text.Substring(openingQuotePos)} does not have closing {closingQuoteChar} character."));
         }
 
@@ -554,7 +578,7 @@ namespace FormulaParser.Tests
         private readonly string _text;
         private readonly int _currentPosition;
 
-        private static readonly string[] OperatorLexems = new[] { "<=", ">=", "==", "!=", "<", ">", ",", "(", ")", "[", "]", "+", "-", "*", "/", "%" };
+        private static readonly string[] OperatorLexems = new[] { "<=", ">=", "==", "!=", "&&", "||", "<", ">", ",", "(", ")", "[", "]", "+", "-", "*", "/", "%", "|", "&" };
     }
 
     public readonly struct ParsingResult<TResult>
@@ -655,9 +679,9 @@ namespace FormulaParser.Tests
             return textInput => new ParsingResult<TResult>(result, textInput);
         }
 
-        public static Parser<TResult> Failure<TResult>(ParsingErrors errors)
+        public static Parser<TResult> Failure<TResult>(Func<TextInput, ParsingErrors> makeErrors)
         {
-            return _ => new ParsingResult<TResult>(errors);
+            return textInput => new ParsingResult<TResult>(makeErrors(textInput));
         }
 
         public static Parser<TValue2> Select<TValue, TValue2>(
@@ -732,7 +756,7 @@ namespace FormulaParser.Tests
                 return 
                     tryParse(text, out var result)
                         ? new ParsingResult<TResult>(result, textInput)
-                        : new ParsingResult<TResult>(new ParsingErrors(makeErrorMessage(text)));
+                        : new ParsingResult<TResult>(textInput.MakeErrors(makeErrorMessage(text)));
             };
         }
     }
