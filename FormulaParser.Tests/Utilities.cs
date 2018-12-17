@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics.Contracts;
 using System.Linq;
 
 namespace FormulaParser.Tests
@@ -38,6 +39,11 @@ namespace FormulaParser.Tests
             return _hasValue ? _value : defaultValue;
         }
 
+        public T OrElse(Func<T> getDefaultValue)
+        {
+            return _hasValue ? _value : getDefaultValue();
+        }
+
         public override string ToString()
         {
             return _hasValue ? _value.ToString() : $"Maybe<{typeof(T).Name}>.None";
@@ -73,6 +79,7 @@ namespace FormulaParser.Tests
             _isLeft = isLeft;
         }
 
+        [Pure]
         public TResult Fold<TResult>(Func<TLeft, TResult> getFromLeft, Func<TRight, TResult> getFromRight) =>
             _isLeft ? getFromLeft(_left) : getFromRight(_right);
 

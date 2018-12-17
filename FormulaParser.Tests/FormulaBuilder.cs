@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -8,7 +9,6 @@ using static FormulaParser.Tests.Maybe;
 using static FormulaParser.Tests.Either;
 using static FormulaParser.Tests.CollectionExtensions;
 using static FormulaParser.Tests.ParserExtensions;
-using System.Diagnostics;
 
 namespace FormulaParser.Tests
 {
@@ -49,7 +49,7 @@ namespace FormulaParser.Tests
             var stringLiteral = QuotedLiteral(new TryParse<string>(CopyString), '\'');
             var literal = dateTimeLiteral.Or(stringLiteral).Or(integerLiteral).Or(decimalLiteral);
 
-            var propertyAccessor = from propertyName in QuotedLiteral('[', ']').Or(new Parser<string>(TextInput.Identifier))
+            var propertyAccessor = from propertyName in QuotedLiteral('[', ']').Or(TextInput.Identifier)
                                    from propertyType in AsParser(tryGetPropertyTypeByName, propertyName, n => $"Unknown property: {n}")
                                    select new ValueCalculator(propertyType, Expression.Property(_formulaParameter, propertyName));
 
@@ -58,11 +58,23 @@ namespace FormulaParser.Tests
                                 from closingBrace in OperatorLexem(")")
                                 select arguments.Map(a => a.Elements).OrElse(Enumerable.Empty<ValueCalculator>());
 
+            TryParse<Maybe<MethodInfo>> tryGetFunctionOrConditionExpressionByName = (string name, out Maybe<MethodInfo> result) =>
+                {
+                    result = tryGetFunctionByName(name, out var methodInfo) ? Some(methodInfo) : None;
+                    return result.Map(_ => true).OrElse(name == "Iif");
+                };
+
             var functionCall = from functionName in new Parser<string>(TextInput.Identifier)
-                               from methodInfo in AsParser(tryGetFunctionByName, functionName, n => $"Unknown function: {n}")
                                from parameters in parameterList
-                               from arguments in MakeFunctionCallArguments(methodInfo, parameters.ToArray()).StopParsingIfFailed()
-                               select new ValueCalculator(methodInfo.ReturnType, Expression.Call(methodInfo, arguments));
+                               from methodInfo in AsParser(tryGetFunctionOrConditionExpressionByName, functionName, n => $"Unknown function: {n}").StopParsingIfFailed()
+                               from arguments in methodInfo
+                                                    .Map(mi => MakeFunctionCallArguments(mi, parameters.ToArray()))
+                                                    .OrElse(() => MakeIifFunctionCallArguments(parameters.ToArray()))
+                                                    .StopParsingIfFailed()
+                               select new ValueCalculator(
+                                   methodInfo.Map(mi => mi.ReturnType).OrElse(() => arguments[1].Type),
+                                   methodInfo.Map(mi => (Expression)Expression.Call(mi, arguments))
+                                             .OrElse(() => Expression.Condition(arguments[0], arguments[1], arguments[2])));
 
             var bracedExpression = from openingBrace in OperatorLexem("(")
                                    from internalExpression in _formulaTextParser
@@ -130,6 +142,32 @@ namespace FormulaParser.Tests
                         _ => throw new InvalidOperationException("Program logic error: by this time we should have made sure that all parameters are compatible by types."),
                         calculator => calculator.CalculateExpression))
                     .ToArray());
+        }
+
+        private static Parser<Expression[]> MakeIifFunctionCallArguments(ValueCalculator[] parameterCalculators)
+        {
+            if (3 != parameterCalculators.Length)
+            {
+                return Failure<Expression[]>(textInput =>
+                    textInput.MakeErrors($"Function Iif expects 3 parameters, {parameterCalculators.Length} provided."));
+            }
+
+            if (parameterCalculators[0].ResultType != typeof(bool))
+            {
+                return Failure<Expression[]>(textInput =>
+                    textInput.MakeErrors($"The first argument of Iif function should be 'System.Boolean', '{parameterCalculators[0].ResultType.Name}' provided."));
+            }
+
+            var realArgumentCalculators =
+                from resultingType in ValueCalculator.TryToDeduceResultingType("Iif", parameterCalculators[1].ResultType, parameterCalculators[2].ResultType)
+                from firstValue in parameterCalculators[1].TryCastTo(resultingType)
+                from secondValue in parameterCalculators[2].TryCastTo(resultingType)
+                select new[] { parameterCalculators[0].CalculateExpression, firstValue.CalculateExpression, secondValue.CalculateExpression };
+
+            return realArgumentCalculators
+                        .Fold(
+                            error => Failure<Expression[]>(textInput => textInput.MakeErrors(error, null)),
+                            arguments => Success(arguments));
         }
 
         private static Parser<ValueCalculator> ArithmeticExpressionParser(
@@ -287,7 +325,7 @@ namespace FormulaParser.Tests
             return $"'{ResultType.Name}': {CalculateExpression}";
         }
 
-        private static Either<ParsingError, Type> TryToDeduceResultingType(string operatorChars, Type type1, Type type2)
+        public static Either<ParsingError, Type> TryToDeduceResultingType(string operatorChars, Type type1, Type type2)
         {
             var i1 = Array.IndexOf(TypesConversionSequence, type1);
             var i2 = Array.IndexOf(TypesConversionSequence, type2);
@@ -326,17 +364,17 @@ namespace FormulaParser.Tests
     {
         public ParsingError(string errorMessage)
         {
-            ErrorMessage = errorMessage;
+            _errorMessage = errorMessage;
         }
-
-        public readonly string ErrorMessage;
 
         public ParsingError Amend(Func<string, string> amendMessage)
         {
-            return new ParsingError(amendMessage(ErrorMessage));
+            return new ParsingError(amendMessage(_errorMessage));
         }
 
-        public override string ToString() => ErrorMessage;
+        public override string ToString() => _errorMessage;
+
+        private readonly string _errorMessage;
     }
 
     public sealed class ParsingErrors 
@@ -696,10 +734,7 @@ namespace FormulaParser.Tests
             Func<TValue, Parser<TIntermediate>> selector,
             Func<TValue, TIntermediate, TValue2> projector)
         {
-            return textInput =>
-            {
-                return @this(textInput).SelectMany(selector, projector);
-            };
+            return textInput => @this(textInput).SelectMany(selector, projector);
         }
 
         public static Parser<Maybe<TResult>> Optional<TResult>(Parser<TResult> @this)
@@ -707,7 +742,7 @@ namespace FormulaParser.Tests
             return textInput =>
             {
                 return @this(textInput)
-                        .Map(parsedValue => Some(parsedValue))
+                        .Map(Some)
                         .OrElse(_ => new ParsingResult<Maybe<TResult>>(None, textInput));
             };
         }
@@ -718,14 +753,6 @@ namespace FormulaParser.Tests
             {
                 return first(textInput).OrElse(_ => second(textInput));
             };
-        }
-
-        public static Parser<IReadOnlyCollection<TResult>> Repeat<TResult>(Parser<TResult> parser)
-        {
-            return (from headElement in parser
-                    from tailElements in Repeat(parser)
-                    select Concatenate(headElement, tailElements))
-                   .Or(Success((IReadOnlyCollection<TResult>)new List<TResult>()));
         }
 
         public static Parser<ParsedUniformList<TElement, TLink>> UniformList<TElement, TLink>(
@@ -752,12 +779,17 @@ namespace FormulaParser.Tests
             Func<string, string> makeErrorMessage)
         {
             return textInput =>
-            {
-                return 
-                    tryParse(text, out var result)
+                tryParse(text, out var result)
                         ? new ParsingResult<TResult>(result, textInput)
                         : new ParsingResult<TResult>(textInput.MakeErrors(makeErrorMessage(text)));
-            };
+        }
+
+        private static Parser<IReadOnlyCollection<TResult>> Repeat<TResult>(Parser<TResult> parser)
+        {
+            return (from headElement in parser
+                    from tailElements in Repeat(parser)
+                    select Concatenate(headElement, tailElements))
+                   .Or(Success((IReadOnlyCollection<TResult>)new List<TResult>()));
         }
     }
 }

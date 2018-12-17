@@ -131,9 +131,6 @@ namespace FormulaParser.Tests
                     }
                 }
             }
-
-            Assert.Fail(@"Check the following cases: 
-* If(division-by-zero) special case.");
         }
 
         [TestMethod]
@@ -289,6 +286,27 @@ namespace FormulaParser.Tests
                         formula.Apply(DefaultPropertyHolder), 
                         $"Formula text: {formulaTextWithSpaces}, Expression built: {formula}");
                 }
+            }
+        }
+
+        [TestMethod]
+        public void ThenItShouldCorrectlyRunIifCalls()
+        {
+            foreach (var ifFormula in new[] 
+            {
+                new { FormulaText = "Iif(I != 10, 100 / (I - 10), -500)", Variable = 10, ExpectedResult = (object)-500 },
+                new { FormulaText = "Iif(I != 10, 100 / (I - 10), -500)", Variable = 30, ExpectedResult = (object)5 },
+
+                new { FormulaText = "Iif(I != 10, 100 / (I - 10), -500.5)", Variable = 10, ExpectedResult = (object)-500.5M },
+                new { FormulaText = "Iif(I != 10, 100 / (I - 10), -500.5)", Variable = 30, ExpectedResult = (object)5M }
+            })
+            {
+                var propertyHolder = new PropertyHolder { I = ifFormula.Variable };
+                var formula = _testee.Build(ifFormula.FormulaText);
+                Assert.AreEqual(
+                    ifFormula.ExpectedResult,
+                    formula.Apply(propertyHolder),
+                    $"Formula text: {ifFormula.FormulaText}, Expression built: {formula}");
             }
         }
 
