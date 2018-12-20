@@ -310,6 +310,72 @@ namespace FormulaParser.Tests
             }
         }
 
+        [TestMethod]
+        public void ThenItShouldCorrectlyParseStatementsWithNegation()
+        {
+            foreach (var formula in new[]
+                {
+                    new { Text = "|-|1|", ExpectedResult = (object)-1 },
+                    new { Text = "|-|[I]|", ExpectedResult = (object)-DefaultPropertyHolder.I },
+                    new { Text = "|-|f(|)|", ExpectedResult = (object)-StockFunctions.f() },
+                    new { Text = "|-|10|-|5| + 6", ExpectedResult = (object)(-10 - 5 + 6) },
+                    new { Text = "|-|(|10|+|f|(|)|)|/|3|", ExpectedResult = (object)(-(10 + StockFunctions.f()) / 3) },
+                    new { Text = "|If|(|-|foo|(|1|)|<|0|,|f|(|)|,|-|f|(|)|)|", ExpectedResult = (object)(-StockFunctions.foo(1) < 0 ? StockFunctions.f() : -StockFunctions.f()) }
+                })
+            {
+                foreach (var formulaText in InsertSpacesIntoFormula(formula.Text))
+                {
+                    var builtFormula = _testee.Build(formulaText);
+                    Assert.AreEqual(
+                        formula.ExpectedResult,
+                        builtFormula.Apply(DefaultPropertyHolder),
+                        $"Formula text: {formulaText}, Expression built: {builtFormula}");
+                }
+            }
+        }
+
+        [TestMethod, Ignore]
+        public void ThenItShouldCorrectlyParseComplexFormulas()
+        {
+            foreach (var formulaData in new[] 
+                {
+                    new
+                    {
+                        FormulaText =
+@"
+if ( [Prod] = 'MM',
+	if(  ([Quantity] =0) || (sum ([all:Quantity]) = [first:Quantity]) ,
+		0,
+		-sum( [all:Quantity] ) / (max([Days],1) * [first:Quantity] /365 )
+	),
+	if ( [vsBase] = 'USD',
+		if ( [Instrument] = 'USD', 0 , [Swap Rate] ),
+		if ( [vsBase] = 'RUB',
+			if ( [Instrument] = 'RUB',   [Wgt Rate RUB std] , 
+				( (1+[Wgt Rate RUB std]/365) * (1+[Swap Rate]/365) - 1) * 365 
+			),
+			if ( [vsBase] = 'EUR',
+				if ( [Instrument] = 'EUR',   [Wgt Rate EUR std] , 
+					( (1+[Wgt Rate EUR std]/365) * (1+[Swap Rate]/365) - 1) * 365 
+				),
+				999
+			)
+		)
+	)
+",
+                        ExpectedResult = (object)0
+                    }
+                })
+            {
+                var formula = _testee.Build(formulaData.FormulaText);
+                Assert.AreEqual(
+                    formulaData.ExpectedResult,
+                    formula.Apply(DefaultPropertyHolder),
+                    $"Formula text: {formulaData.FormulaText}, Expression built: {formula}");
+
+            }
+        }
+
         private static IEnumerable<string> SurroundWithSpaces(IEnumerable<string> formulaTexts)
         {
             return from formulaText in formulaTexts

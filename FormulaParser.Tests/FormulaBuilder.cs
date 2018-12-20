@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -43,8 +42,8 @@ namespace FormulaParser.Tests
         {
             _formulaParameter = Expression.Parameter(targetType);
 
-            var integerLiteral = NumericLiteral(new TryParse<int>(int.TryParse), (sign, v) => sign * v);
-            var decimalLiteral = NumericLiteral(new TryParse<decimal>(decimal.TryParse), (sign, v) => sign * v);
+            var integerLiteral = NumericLiteral(new TryParse<int>(int.TryParse));
+            var decimalLiteral = NumericLiteral(new TryParse<decimal>(decimal.TryParse));
             var dateTimeLiteral = QuotedLiteral(new TryParse<DateTime>(DateTime.TryParse), '\'');
             var stringLiteral = QuotedLiteral(new TryParse<string>(CopyString), '\'');
             var literal = dateTimeLiteral.Or(stringLiteral).Or(integerLiteral).Or(decimalLiteral);
@@ -61,7 +60,7 @@ namespace FormulaParser.Tests
             TryParse<Maybe<MethodInfo>> tryGetFunctionOrConditionExpressionByName = (string name, out Maybe<MethodInfo> result) =>
                 {
                     result = tryGetFunctionByName(name, out var methodInfo) ? Some(methodInfo) : None;
-                    return result.Map(_ => true).OrElse(name == "Iif");
+                    return result.Map(_ => true).OrElse(name == "Iif" || name == "If");
                 };
 
             var functionCall = from functionName in new Parser<string>(TextInput.Identifier)
@@ -81,7 +80,10 @@ namespace FormulaParser.Tests
                                    from closingBrace in OperatorLexem(")")
                                    select internalExpression;
 
-            var multiplier = literal.Or(bracedExpression).Or(functionCall).Or(propertyAccessor);
+            var multiplier = from optionalSign in Optional(OperatorLexem("+", "-"))
+                             from valueCalculator in literal.Or(bracedExpression).Or(functionCall).Or(propertyAccessor)
+                             from adjustedCalculator in AsParser(valueCalculator.TryGiveSign(optionalSign.OrElse(string.Empty)))
+                             select adjustedCalculator;
             var addend = ArithmeticExpressionParser(multiplier, "*", "/", "%");
             var comparableExpression = ArithmeticExpressionParser(addend, "+", "-");
             var equatableExpression = ArithmeticExpressionParser(comparableExpression, "<", "<=", ">", ">=");
@@ -192,15 +194,10 @@ namespace FormulaParser.Tests
                         Success);
         }
 
-        private static Parser<ValueCalculator> NumericLiteral<TNumeric>(
-            TryParse<TNumeric> tryParse, 
-            Func<int, TNumeric, TNumeric> giveSign) where TNumeric : struct
+        private static Parser<ValueCalculator> NumericLiteral<TNumeric>(TryParse<TNumeric> tryParse) where TNumeric : struct
         {
-            return  from headingSpaces in new Parser<int>(TextInput.EatWhiteSpaces)
-                    from optionalSign in Optional(OperatorLexem("+", "-"))
-                    from numericValue in Literal(tryParse)
-                    let literal = giveSign(optionalSign.OrElse("+") == "+" ? 1 : -1, numericValue)
-                    select new ValueCalculator(typeof(TNumeric), Expression.Constant(literal, typeof(TNumeric)));
+            return from numericValue in Literal(tryParse)
+                   select new ValueCalculator(typeof(TNumeric), Expression.Constant(numericValue, typeof(TNumeric)));
         }
 
         private static Parser<string> QuotedLiteral(char openingQuoteChar, char? closingQuoteChar = null)
@@ -337,6 +334,25 @@ namespace FormulaParser.Tests
             return Right(i1 > i2 ? type1 : type2);
         }
 
+        public Either<ParsingError, ValueCalculator> TryGiveSign(string sign)
+        {
+            if (!IsNumeric && !string.IsNullOrEmpty(sign))
+            {
+                return Left(new ParsingError($"Operator '{sign}' cannot be applied to operand of type '{ResultType.Name}'"));
+            }
+
+            return Right(
+                sign != "-" 
+                    ? this 
+                    : new ValueCalculator(
+                        ResultType, 
+                        Expression.Multiply(
+                            Expression.Constant(Convert.ChangeType(-1, ResultType), ResultType), 
+                            CalculateExpression)));
+        }
+
+        private bool IsNumeric => TypesConversionSequence.Contains(ResultType);
+
         private static readonly IReadOnlyDictionary<string, (Func<Expression, Expression, Expression> Expression, bool ResultIsBoolean)> KnownBinaryOperations = 
             new Dictionary<string, (Func<Expression, Expression, Expression>, bool)>
             {
@@ -390,7 +406,6 @@ namespace FormulaParser.Tests
             _tailErrors = tailErrors;
             _errorLocation = errorLocation;
             IsFatal = isFatal;
-            Trace.WriteLine("=========" + ToString());
         }
 
         public bool IsFatal { get; }
@@ -771,6 +786,13 @@ namespace FormulaParser.Tests
         public static Parser<TResult> StopParsingIfFailed<TResult>(this Parser<TResult> @this)
         {
             return textInput => @this(textInput).OrElse(error => new ParsingResult<TResult>(error.MakeFatal()));
+        }
+
+        public static Parser<TResult> AsParser<TResult>(Either<ParsingError, TResult> resultOrError)
+        {
+            return resultOrError.Fold(
+                error => Failure<TResult>(textInput=> textInput.MakeErrors(error, null)), 
+                result => Success(result));
         }
 
         public static Parser<TResult> AsParser<TResult>(
