@@ -1,7 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics.Contracts;
 using System.Linq;
+using JetBrains.Annotations;
+using Pure = System.Diagnostics.Contracts.PureAttribute;
 
 namespace FormulaParser.Tests
 {
@@ -49,7 +50,7 @@ namespace FormulaParser.Tests
             return _hasValue ? _value.ToString() : $"Maybe<{typeof(T).Name}>.None";
         }
 
-        public static implicit operator Maybe<T>(MaybeNoneFactory noneFactory) => new Maybe<T>();
+        public static implicit operator Maybe<T>([UsedImplicitly] MaybeNoneFactory noneFactory) => new Maybe<T>();
 
         private readonly bool _hasValue;
         private readonly T _value;

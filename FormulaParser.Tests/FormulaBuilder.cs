@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -44,17 +45,22 @@ namespace FormulaParser.Tests
 
             var integerLiteral = NumericLiteral(new TryParse<int>(int.TryParse));
             var decimalLiteral = NumericLiteral(new TryParse<decimal>(decimal.TryParse));
-            var dateTimeLiteral = QuotedLiteral(new TryParse<DateTime>(DateTime.TryParse), '\'');
-            var stringLiteral = QuotedLiteral(new TryParse<string>(CopyString), '\'');
+            var dateTimeLiteral = QuotedLiteral(new TryParse<DateTime>(DateTime.TryParse));
+            var stringLiteral = TextInput.QuotedLiteral.Select(ValueCalculator.Constant);
             var literal = dateTimeLiteral.Or(stringLiteral).Or(integerLiteral).Or(decimalLiteral);
 
-            var propertyAccessor = from propertyName in QuotedLiteral('[', ']').Or(TextInput.Identifier)
-                                   from propertyType in AsParser(tryGetPropertyTypeByName, propertyName, n => $"Unknown property: {n}")
-                                   select new ValueCalculator(propertyType, Expression.Property(_formulaParameter, propertyName));
+            var quotedPropertyName = from openingBracket in TextInput.Lexem("[")
+                                     from nameParts in Repeat(TextInput.Identifier, atLeastOnce: true)
+                                     from closingBraket in TextInput.Lexem("]")
+                                     select string.Join(string.Empty, nameParts);
+            var propertyName = quotedPropertyName.Or(TextInput.Identifier);
+            var propertyAccessor = from name in propertyName
+                                   from property in name.Try(tryGetPropertyTypeByName, n => $"Unknown property: '{n}'").StopParsingIfFailed()
+                                   select new ValueCalculator(property, Expression.Property(_formulaParameter, name));
 
-            var parameterList = from openingBrace in OperatorLexem("(")
-                                from arguments in Optional(UniformList(_formulaTextParser, OperatorLexem(",")))
-                                from closingBrace in OperatorLexem(")")
+            var parameterList = from openingBrace in TextInput.Lexem("(")
+                                from arguments in Optional(UniformList(_formulaTextParser, TextInput.Lexem(",")))
+                                from closingBrace in TextInput.Lexem(")")
                                 select arguments.Map(a => a.Elements).OrElse(Enumerable.Empty<ValueCalculator>());
 
             TryParse<Maybe<MethodInfo>> tryGetFunctionOrConditionExpressionByName = (string name, out Maybe<MethodInfo> result) =>
@@ -63,9 +69,9 @@ namespace FormulaParser.Tests
                     return result.Map(_ => true).OrElse(name == "Iif" || name == "If");
                 };
 
-            var functionCall = from functionName in new Parser<string>(TextInput.Identifier)
+            var functionCall = from functionName in TextInput.Identifier
                                from parameters in parameterList
-                               from methodInfo in AsParser(tryGetFunctionOrConditionExpressionByName, functionName, n => $"Unknown function: {n}").StopParsingIfFailed()
+                               from methodInfo in functionName.Try(tryGetFunctionOrConditionExpressionByName, n => $"Unknown function: {n}").StopParsingIfFailed()
                                from arguments in methodInfo
                                                     .Map(mi => MakeFunctionCallArguments(mi, parameters.ToArray()))
                                                     .OrElse(() => MakeIifFunctionCallArguments(parameters.ToArray()))
@@ -75,12 +81,12 @@ namespace FormulaParser.Tests
                                    methodInfo.Map(mi => (Expression)Expression.Call(mi, arguments))
                                              .OrElse(() => Expression.Condition(arguments[0], arguments[1], arguments[2])));
 
-            var bracedExpression = from openingBrace in OperatorLexem("(")
+            var bracedExpression = from openingBrace in TextInput.Lexem("(")
                                    from internalExpression in _formulaTextParser
-                                   from closingBrace in OperatorLexem(")")
+                                   from closingBrace in TextInput.Lexem(")")
                                    select internalExpression;
 
-            var multiplier = from optionalSign in Optional(OperatorLexem("+", "-"))
+            var multiplier = from optionalSign in Optional(TextInput.Lexem("-", "+"))
                              from valueCalculator in literal.Or(bracedExpression).Or(functionCall).Or(propertyAccessor)
                              from adjustedCalculator in AsParser(valueCalculator.TryGiveSign(optionalSign.OrElse(string.Empty)))
                              select adjustedCalculator;
@@ -169,14 +175,14 @@ namespace FormulaParser.Tests
             return realArgumentCalculators
                         .Fold(
                             error => Failure<Expression[]>(textInput => textInput.MakeErrors(error, null)),
-                            arguments => Success(arguments));
+                            Success);
         }
 
         private static Parser<ValueCalculator> ArithmeticExpressionParser(
             Parser<ValueCalculator> elementParser, 
             params string[] operationLexems)
         {
-            return from elements in UniformList(elementParser, OperatorLexem(operationLexems))
+            return from elements in UniformList(elementParser, TextInput.Operator(operationLexems))
                    from combinedCalculator in FoldBinaryOperatorsList(elements).StopParsingIfFailed()
                    select combinedCalculator;
         }
@@ -196,53 +202,16 @@ namespace FormulaParser.Tests
 
         private static Parser<ValueCalculator> NumericLiteral<TNumeric>(TryParse<TNumeric> tryParse) where TNumeric : struct
         {
-            return from numericValue in Literal(tryParse)
-                   select new ValueCalculator(typeof(TNumeric), Expression.Constant(numericValue, typeof(TNumeric)));
+            return from token in TextInput.RegularToken
+                   from numeric in token.Try(tryParse, t => $"Could not parse {typeof(TNumeric).Name} from value {t}")
+                   select ValueCalculator.Constant(numeric);
         }
 
-        private static Parser<string> QuotedLiteral(char openingQuoteChar, char? closingQuoteChar = null)
+        private static Parser<ValueCalculator> QuotedLiteral<T>(TryParse<T> tryParse)
         {
-            return textInput => textInput.NextQuotedToken(openingQuoteChar, closingQuoteChar ?? openingQuoteChar);
-        }
-
-        private static Parser<ValueCalculator> QuotedLiteral<T>(TryParse<T> tryParse, char openingQuoteChar, char? closingQuoteChar = null)
-        {
-            return from tokenText in QuotedLiteral(openingQuoteChar, closingQuoteChar)
-                   from parsedLiteral in AsParser(
-                                            tryParse,
-                                            tokenText,
-                                            t => $"Could not parse {typeof(T).Name} from value " +
-                                                  $"{openingQuoteChar}{t.Replace(openingQuoteChar.ToString(), "\\" + openingQuoteChar)}{openingQuoteChar}")
-                   select new ValueCalculator(typeof(T), Expression.Constant(parsedLiteral, typeof(T)));
-        }
-
-        private static Parser<T> Literal<T>(TryParse<T> tryParse) where T : struct
-        {
-            return textInput =>
-            {
-                return textInput
-                        .NextToken()
-                        .FlatMap(tokenText => 
-                            tryParse(tokenText, out T result)
-                                ? Right<ParsingErrors, T>(result)
-                                : Left<ParsingErrors, T>(
-                                    textInput.MakeErrors($"Could not parse {typeof(T).Name} from value {tokenText}")));
-            };
-        }
-
-        private static Parser<string> OperatorLexem(params string[] expectedLexems)
-        {
-            return textInput =>
-            {
-                return textInput
-                        .NextOperatorLexem()
-                        .FlatMap(lexem =>
-                            expectedLexems.Contains(lexem)
-                                ? Right<ParsingErrors, string>(lexem)
-                                : Left<ParsingErrors, string>(
-                                    textInput.MakeErrors(
-                                        $"None of expected characters ['{string.Join("', '", expectedLexems)}'] is present")));
-            };
+            return from literal in TextInput.QuotedLiteral
+                   from parsedLiteral in literal.Try(tryParse, t => $"Could not parse {typeof(T).Name} from value '{t}'")
+                   select ValueCalculator.Constant(parsedLiteral);
         }
 
         private static Parser<TResult> EatTrailingSpaces<TResult>(Parser<TResult> parser)
@@ -250,12 +219,6 @@ namespace FormulaParser.Tests
             return from result in parser
                    from trailingSpaces in new Parser<int>(TextInput.EatWhiteSpaces)
                    select result;
-        }
-
-        private static bool CopyString(string s, out string result)
-        {
-            result = s;
-            return true;
         }
 
         private readonly Parser<ValueCalculator> _formulaTextParser;
@@ -320,6 +283,11 @@ namespace FormulaParser.Tests
         public override string ToString()
         {
             return $"'{ResultType.Name}': {CalculateExpression}";
+        }
+
+        public static ValueCalculator Constant<T>(T value)
+        {
+            return new ValueCalculator(typeof(T), Expression.Constant(value, typeof(T)));
         }
 
         public static Either<ParsingError, Type> TryToDeduceResultingType(string operatorChars, Type type1, Type type2)
@@ -406,6 +374,7 @@ namespace FormulaParser.Tests
             _tailErrors = tailErrors;
             _errorLocation = errorLocation;
             IsFatal = isFatal;
+            Trace.WriteLine("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  " + headError + " " + errorLocation);
         }
 
         public bool IsFatal { get; }
@@ -452,59 +421,81 @@ namespace FormulaParser.Tests
 
         public bool IsEmpty => _currentPosition == _text.Length;
 
-        public ParsingResult<string> NextToken()
+        public static readonly Parser<string> RegularToken =
+            from leadingWhitespaces in Repeat(char.IsWhiteSpace)
+            from tokenCharacters in Repeat(ch => !char.IsWhiteSpace(ch) && !OperatorStartingCharacters.Contains(ch) && ch != '\'' && ch != '\\', atLeastOnce: true)
+            select string.Join(string.Empty, tokenCharacters);
+
+        public static readonly Parser<string> QuotedLiteral =
+            from leadingWhitespaces in Repeat(char.IsWhiteSpace)
+            from openingQuote in Match("'")
+            from literalCharacters in Repeat((prevCh, ch) => ch != '\'' || prevCh == '\\', atLeastOnce: false)
+            from closingQuote in Match("'")
+            select string.Join(string.Empty, literalCharacters).Replace("\\", string.Empty);
+
+        public static readonly Parser<string> Identifier =
+            from leadingWhitespaces in Repeat(char.IsWhiteSpace)
+            from identifierCharcters in Repeat((prevCh, ch) => prevCh == null ? char.IsLetter(ch) : char.IsLetterOrDigit(ch), atLeastOnce: true)
+            select identifierCharcters;
+
+        public static Parser<string> Lexem(params string[] lexemsText)
         {
-            var firstNonSpaceCharPos = SkipLeadingSpaces();
-            if (firstNonSpaceCharPos == null)
-            {
-                return new ParsingResult<string>(MakeErrors("No more tokens in the input."));
-            }
-
-            var operationLexem = TryScanOperationLexem(firstNonSpaceCharPos.Value);
-            if (operationLexem != null)
-            {
-                return operationLexem.Value;
-            }
-
-            var firstNonTokenCharPos = ScanMultiCharToken(firstNonSpaceCharPos.Value);
-            return new ParsingResult<string>(
-                _text.Substring(firstNonSpaceCharPos.Value, firstNonTokenCharPos - firstNonSpaceCharPos.Value),
-                SkipTo(firstNonTokenCharPos));
+            return from leadingWhitespaces in Repeat(char.IsWhiteSpace)
+                   from text in Match(lexemsText)
+                   select text;
         }
 
-        public ParsingResult<string> NextQuotedToken(char openingQuoteChar, char closingQuoteChar)
+        public static Parser<string> Operator(string[] operatorLexems)
         {
-            var firstNonSpaceCharPos = SkipLeadingSpaces();
-            if (firstNonSpaceCharPos == null)
-            {
-                return new ParsingResult<string>(MakeErrors("No more tokens in the input."));
-            }
+            var operators = operatorLexems
+                .OrderByDescending(op => op.Length)
+                .Aggregate(
+                    default(Parser<string>),
+                    (parser, operatorString) => parser != null ? parser.Or(Match(operatorString)) : Match(operatorString));
 
-            var firstTokenChar = _text[firstNonSpaceCharPos.Value];
-            if (firstTokenChar != openingQuoteChar)
-            {
-                return new ParsingResult<string>(MakeErrors($"Expected {openingQuoteChar}."));
-            }
-
-            var tokenLengthOrError = ScanQuotedToken(firstNonSpaceCharPos.Value, closingQuoteChar);
-            var localThis = this;
-            return tokenLengthOrError.Map(
-                tokenLength => localThis._text
-                    .Substring(firstNonSpaceCharPos.Value + 1, tokenLength)
-                    .Replace("\\" + openingQuoteChar, openingQuoteChar.ToString())
-                    .Replace("\\" + closingQuoteChar, closingQuoteChar.ToString()));
+            return from leadingWhitespaces in Repeat(char.IsWhiteSpace)
+                   from op in operators
+                   select op;
         }
 
-        public ParsingResult<string> NextOperatorLexem()
+        private static Parser<string> Match(params string[] texts)
         {
-            var firstNonSpaceCharPos = SkipLeadingSpaces();
-            if (firstNonSpaceCharPos == null)
+            return textInput =>
             {
-                return new ParsingResult<string>(MakeErrors("No more tokens in the input."));
-            }
+                var matchingText = Array.FindIndex(
+                    texts,
+                    text => string.Compare(textInput._text, textInput._currentPosition, text, 0, text.Length, StringComparison.Ordinal) == 0);
+                return matchingText >= 0
+                    ? new ParsingResult<string>(texts[matchingText], textInput.SkipTo(textInput._currentPosition + texts[matchingText].Length))
+                    : new ParsingResult<string>(textInput.MakeErrors($"{(texts.Length > 1 ? "One of " : string.Empty)}'{(texts.Length > 1 ? string.Join(" ", texts) : texts.Single())}' expected"));
+            };
+        }
 
-            return TryScanOperationLexem(firstNonSpaceCharPos.Value) 
-                 ?? new ParsingResult<string>(MakeErrors($"Next token is not an operation lexem {SkipTo(firstNonSpaceCharPos.Value)}."));
+        private static Parser<string> Repeat(Func<char?, char, bool> isExpectedChar, bool atLeastOnce)
+        {
+            return textInput =>
+            {
+                var indexOfFirstUnexpectedChar = textInput._currentPosition;
+                for (;
+                    indexOfFirstUnexpectedChar < textInput._text.Length &&
+                    isExpectedChar(
+                        indexOfFirstUnexpectedChar == textInput._currentPosition ? (char?)null : textInput._text[indexOfFirstUnexpectedChar - 1],
+                        textInput._text[indexOfFirstUnexpectedChar]);
+                    ++indexOfFirstUnexpectedChar)
+                {
+                }
+
+                return indexOfFirstUnexpectedChar == textInput._currentPosition && atLeastOnce
+                    ? new ParsingResult<string>(textInput.MakeErrors("unexpected char"))
+                    : new ParsingResult<string>(
+                        textInput._text.Substring(textInput._currentPosition, indexOfFirstUnexpectedChar - textInput._currentPosition),
+                        textInput.SkipTo(indexOfFirstUnexpectedChar));
+            };
+        }
+
+        private static Parser<string> Repeat(Func<char, bool> isExpectedChar, bool atLeastOnce = false)
+        {
+            return Repeat((_, ch) => isExpectedChar(ch), atLeastOnce);
         }
 
         public ParsingErrors AsUnparsedInputError() =>
@@ -532,28 +523,6 @@ namespace FormulaParser.Tests
             return new ParsingResult<int>(whitespaceCount, input.SkipTo(firstNonSpaceCharPos ?? input._text.Length));
         }
 
-        public static ParsingResult<string> Identifier(TextInput input)
-        {
-            var firstNonSpaceCharPos = input.SkipLeadingSpaces();
-            if (firstNonSpaceCharPos == null)
-            {
-                return new ParsingResult<string>(input.MakeErrors("Identifier expected."));
-            }
-
-            if (!char.IsLetter(input._text[firstNonSpaceCharPos.Value]))
-            {
-                return new ParsingResult<string>(input.MakeErrors("The first character of an identifier should be a letter."));
-            }
-
-            var i = firstNonSpaceCharPos.Value + 1;
-            for (; i < input._text.Length && char.IsLetterOrDigit(input._text[i]); ++i)
-            {
-            }
-
-            var identifierLength = i - firstNonSpaceCharPos.Value;
-            return new ParsingResult<string>(input._text.Substring(firstNonSpaceCharPos.Value, identifierLength), input.SkipTo(i));
-        }
-
         private int? SkipLeadingSpaces()
         {
             for (var i = _currentPosition; i < _text.Length; ++i)
@@ -567,60 +536,6 @@ namespace FormulaParser.Tests
             return null;
         }
 
-        private ParsingResult<string>? TryScanOperationLexem(int start)
-        {
-            var localText = _text;
-            var matchingLexemIndex = Array.FindIndex(
-                OperatorLexems,
-                l => string.Compare(l, 0, localText, start, l.Length, StringComparison.Ordinal) == 0);
-            if (matchingLexemIndex < 0)
-            {
-                return null;
-            }
-
-            var lexem = OperatorLexems[matchingLexemIndex];
-            return new ParsingResult<string>(lexem, SkipTo(start + lexem.Length));
-        }
-
-        private int ScanMultiCharToken(int tokenStartPos)
-        {
-            for (var i = tokenStartPos + 1; i < _text.Length; ++i)
-            {
-                var ch = _text[i];
-                if (char.IsWhiteSpace(ch) || Array.Exists(OperatorLexems, lexem => lexem.StartsWith(ch)))
-                {
-                    return i;
-                }
-            }
-
-            return _text.Length;
-        }
-
-        private ParsingResult<int> ScanQuotedToken(int openingQuotePos, char closingQuoteChar)
-        {
-            for (var startIndex = openingQuotePos + 1; startIndex < _text.Length; )
-            {
-                var nextQuotePos = _text.IndexOf(closingQuoteChar, startIndex);
-                if (nextQuotePos < 0)
-                {
-                    return new ParsingResult<int>(
-                        MakeErrors(
-                            $"Quoted token {_text.Substring(openingQuotePos)} does not have closing {closingQuoteChar} character."));
-                }
-
-                if (_text[nextQuotePos - 1] != '\\')
-                {
-                    return new ParsingResult<int>(nextQuotePos - openingQuotePos - 1, new TextInput(_text, nextQuotePos + 1));
-                }
-
-                startIndex = nextQuotePos + 1;
-            }
-
-            return new ParsingResult<int>(
-                MakeErrors(
-                    $"Quoted token {_text.Substring(openingQuotePos)} does not have closing {closingQuoteChar} character."));
-        }
-
         private TextInput SkipTo(int newPosition)
         {
             Assert.IsTrue(_currentPosition <= newPosition, "SkipTo goes back.");
@@ -632,6 +547,7 @@ namespace FormulaParser.Tests
         private readonly int _currentPosition;
 
         private static readonly string[] OperatorLexems = new[] { "<=", ">=", "==", "!=", "&&", "||", "<", ">", ",", "(", ")", "[", "]", "+", "-", "*", "/", "%", "|", "&" };
+        private static readonly char[] OperatorStartingCharacters = OperatorLexems.Select(op => op.First()).Distinct().ToArray();
     }
 
     public readonly struct ParsingResult<TResult>
@@ -655,16 +571,6 @@ namespace FormulaParser.Tests
         {
             return new ParsingResult<TMappedResult>(
                 _result.Map(parsingResult => (mapValue(parsingResult.ParsedValue), parsingResult.RemainingInput)));
-        }
-
-        public ParsingResult<TMappedResult> FlatMap<TMappedResult>(
-            Func<TResult, Either<ParsingErrors, TMappedResult>> mapValue)
-        {
-            return _result.Fold(
-                        errors => new ParsingResult<TMappedResult>(errors),
-                        parsingResult => new ParsingResult<TMappedResult>(
-                            mapValue(parsingResult.ParsedValue).Map(mappedValue =>
-                                            (mappedValue, parsingResult.RemainingInput))));
         }
 
         public ParsingResult<TValue2> SelectMany<TIntermediate, TValue2>(
@@ -737,6 +643,11 @@ namespace FormulaParser.Tests
             return textInput => new ParsingResult<TResult>(makeErrors(textInput));
         }
 
+        public static Parser<TResult> StopParsingIfFailed<TResult>(this Parser<TResult> @this)
+        {
+            return textInput => @this(textInput).OrElse(error => new ParsingResult<TResult>(error.MakeFatal()));
+        }
+
         public static Parser<TValue2> Select<TValue, TValue2>(
             this Parser<TValue> @this,
             Func<TValue, TValue2> selector)
@@ -750,6 +661,14 @@ namespace FormulaParser.Tests
             Func<TValue, TIntermediate, TValue2> projector)
         {
             return textInput => @this(textInput).SelectMany(selector, projector);
+        }
+
+        public static Parser<TResult> Try<TResult>(
+            this string @this,
+            TryParse<TResult> tryParse,
+            Func<string, string> makeErrorMessage)
+        {
+            return tryParse(@this, out var r) ? Success(r) : Failure<TResult>(textInput => textInput.MakeErrors(makeErrorMessage(@this)));
         }
 
         public static Parser<Maybe<TResult>> Optional<TResult>(Parser<TResult> @this)
@@ -770,6 +689,14 @@ namespace FormulaParser.Tests
             };
         }
 
+        public static Parser<IReadOnlyCollection<TResult>> Repeat<TResult>(Parser<TResult> parser, bool atLeastOnce = false)
+        {
+            var result = from headElement in parser
+                         from tailElements in Repeat(parser)
+                         select Concatenate(headElement, tailElements);
+            return atLeastOnce ? result : result.Or(Success((IReadOnlyCollection<TResult>)new List<TResult>()));
+        }
+
         public static Parser<ParsedUniformList<TElement, TLink>> UniformList<TElement, TLink>(
             Parser<TElement> elementParser,
             Parser<TLink> linkParser)
@@ -783,35 +710,11 @@ namespace FormulaParser.Tests
                    select new ParsedUniformList<TElement, TLink>(headElement, tailElements);
         }
 
-        public static Parser<TResult> StopParsingIfFailed<TResult>(this Parser<TResult> @this)
-        {
-            return textInput => @this(textInput).OrElse(error => new ParsingResult<TResult>(error.MakeFatal()));
-        }
-
         public static Parser<TResult> AsParser<TResult>(Either<ParsingError, TResult> resultOrError)
         {
             return resultOrError.Fold(
                 error => Failure<TResult>(textInput=> textInput.MakeErrors(error, null)), 
-                result => Success(result));
-        }
-
-        public static Parser<TResult> AsParser<TResult>(
-            TryParse<TResult> tryParse,
-            string text,
-            Func<string, string> makeErrorMessage)
-        {
-            return textInput =>
-                tryParse(text, out var result)
-                        ? new ParsingResult<TResult>(result, textInput)
-                        : new ParsingResult<TResult>(textInput.MakeErrors(makeErrorMessage(text)));
-        }
-
-        private static Parser<IReadOnlyCollection<TResult>> Repeat<TResult>(Parser<TResult> parser)
-        {
-            return (from headElement in parser
-                    from tailElements in Repeat(parser)
-                    select Concatenate(headElement, tailElements))
-                   .Or(Success((IReadOnlyCollection<TResult>)new List<TResult>()));
+                Success);
         }
     }
 }

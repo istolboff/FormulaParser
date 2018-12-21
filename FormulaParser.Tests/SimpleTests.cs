@@ -2,8 +2,9 @@ using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.Reflection;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Globalization;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using JetBrains.Annotations;
 
 namespace FormulaParser.Tests
 {
@@ -29,7 +30,7 @@ namespace FormulaParser.Tests
         [TestMethod]
         public void ThenItShouldCorrectlyParseDecimalLiterals()
         {
-            foreach (var formulaText in SurroundWithSpaces(new[] { "1.0", "-1.0", decimal.MinValue.ToString(), decimal.MaxValue.ToString() }))
+            foreach (var formulaText in SurroundWithSpaces(new[] { "1.0", "-1.0", decimal.MinValue.ToString(CultureInfo.InvariantCulture), decimal.MaxValue.ToString(CultureInfo.InvariantCulture) }))
             {
                 var formula = _testee.Build(formulaText);
                 Assert.AreEqual(decimal.Parse(formulaText), (decimal)formula.Apply(), $"Formula text: [{formulaText}]");
@@ -59,14 +60,46 @@ namespace FormulaParser.Tests
         [TestMethod]
         public void ThenItShouldCorrectlyParsePropertyAccessors()
         {
-            var propertyHolder = new PropertyHolder { Book = Guid.NewGuid().ToString(), InstSubType = SubType.Regular, I = 42, r = 3.1416M };
-            foreach (var formulaText in SurroundWithSpaces(new[] { "Book", "[InstSubType]", "I", "[r]" }))
+            var propertyHolder = new PropertyHolder { Book = Guid.NewGuid().ToString(), InstSubType = SubType.Irregular, I = 42, r = 3.1416M };
+            foreach (var formulaText in SurroundWithSpaces(new[] { "Book", "[InstSubType]", "[Inst Sub Type]", "[ Inst Sub Type ]", "I", "[r]" }))
             {
                 var formula = _testee.Build(formulaText);
                 Assert.AreEqual(
-                    propertyHolder.GetType().GetProperty(formulaText.Trim('[', ' ', ']', '\t')).GetValue(propertyHolder), 
+                    propertyHolder.GetType().GetProperty(formulaText.Trim('[', ' ', ']', '\t').Replace(" ", string.Empty)).GetValue(propertyHolder), 
                     formula.Apply(propertyHolder), 
                     $"Formula text: [{formulaText}]");
+            }
+        }
+
+        [TestMethod]
+        public void ThenItShouldProduceCorrectParsingErrorsForInvalidPropertyAccessors()
+        {
+            foreach (var formula in new[] 
+                {
+                    "MissingProp",
+                    "[MissingProp]", 
+                    "[Missing Prop]", 
+                    "MissingProp + 100",
+                    "100 - [ Missing Prop]", 
+                    "f() / [MissingProp]"
+                })
+            {
+                try
+                {
+                    _testee.Build(formula);
+                    Assert.Fail("Parsing" + Environment.NewLine + "\t" + formula + "should have failed.");
+                }
+                catch (InvalidOperationException exception)
+                {
+                    var expectedExceptionText = "Unknown property: 'MissingProp'";
+                    Assert.IsTrue(
+                        exception.Message.Contains(expectedExceptionText),
+                        "Exception message " + Environment.NewLine + "    " +
+                        exception.Message + Environment.NewLine +
+                        "was supposed to contain the text" + Environment.NewLine + "    " +
+                        expectedExceptionText + Environment.NewLine +
+                        "but it does not.");
+                }
             }
         }
 
@@ -117,7 +150,8 @@ namespace FormulaParser.Tests
                 {
                     try
                     {
-                        var formula = _testee.Build(formulaTextWithSpaces);
+                        _testee.Build(formulaTextWithSpaces);
+                        Assert.Fail("Parsing" + Environment.NewLine + "\t" + formulaTextWithSpaces + "should have failed.");
                     }
                     catch (InvalidOperationException exception)
                     {
@@ -197,7 +231,8 @@ namespace FormulaParser.Tests
                 {
                     try
                     {
-                        var formula = _testee.Build(formulaTextWithSpaces);
+                        _testee.Build(formulaTextWithSpaces);
+                        Assert.Fail("Parsing" + Environment.NewLine + "\t" + formulaTextWithSpaces + "should have failed.");
                     }
                     catch (InvalidOperationException exception)
                     {
@@ -253,7 +288,8 @@ namespace FormulaParser.Tests
                 {
                     try
                     {
-                        var formula = _testee.Build(formulaTextWithSpaces);
+                        _testee.Build(formulaTextWithSpaces);
+                        Assert.Fail("Parsing" + Environment.NewLine + "\t" + formulaTextWithSpaces + "should have failed.");
                     }
                     catch (InvalidOperationException exception)
                     {
@@ -274,8 +310,10 @@ namespace FormulaParser.Tests
         {
             foreach (var booleanFormula in new[]
                 {
+// ReSharper disable RedundantLogicalConditionalExpressionOperand
                     new { FormulaText = "|1|<|3|~or~|3|>|5|", ExpectedResult = (object)(1 < 3 || 3 > 5) },
-                    new { FormulaText = "|8|-|3|<=|9|-|5|&&|3.0|==|3|", ExpectedResult = (object)(8 - 3 <= 9 - 5 && 3M == 3) },
+                    new { FormulaText = "|8|-|3|<=|9|-|5|&&|3.0|==|3|", ExpectedResult = (object)(8 - 3 <= 9 - 5 && 3M == 3) }
+// ReSharper enable RedundantLogicalConditionalExpressionOperand
                 })
             {
                 foreach (var formulaTextWithSpaces in InsertSpacesIntoFormula(booleanFormula.FormulaText))
@@ -399,10 +437,15 @@ if ( [Prod] = 'MM',
         private class PropertyHolder
         {
             public string Book { get; set; }
-            public SubType InstSubType { get; set; }
+
+            public SubType InstSubType { [UsedImplicitly] get; set; }
+
             public int I { get; set; }
+
             #pragma warning disable IDE1006 // Naming Styles
-            public decimal r { get; set; }
+            // ReSharper disable InconsistentNaming
+            public decimal r { [UsedImplicitly] get; set; }
+            // ReSharper enable InconsistentNaming
             #pragma warning restore IDE1006 // Naming Styles
 
             public static bool TryGetPropertyType(string propertyName, out Type propertyType)
@@ -416,14 +459,18 @@ if ( [Prod] = 'MM',
         private static class StockFunctions
         {
             #pragma warning disable IDE1006 // Naming Styles
+            // ReSharper disable InconsistentNaming
             public static int f()
+            // ReSharper enable InconsistentNaming
             #pragma warning restore IDE1006 // Naming Styles
             {
                 return 42;
             }
 
             #pragma warning disable IDE1006 // Naming Styles
+            // ReSharper disable InconsistentNaming
             public static decimal foo(int v)
+            // ReSharper ensable InconsistentNaming
             #pragma warning restore IDE1006 // Naming Styles
             {
                 switch (v)
@@ -439,7 +486,9 @@ if ( [Prod] = 'MM',
             }
 
             #pragma warning disable IDE1006 // Naming Styles
+            // ReSharper disable InconsistentNaming
             public static string bar(string left, string right)
+            // ReSharper enable InconsistentNaming
             #pragma warning restore IDE1006 // Naming Styles
             {
                 return $"{left}=={right}";
