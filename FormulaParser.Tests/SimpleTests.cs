@@ -61,11 +61,11 @@ namespace FormulaParser.Tests
         public void ThenItShouldCorrectlyParsePropertyAccessors()
         {
             var propertyHolder = new PropertyHolder { Book = Guid.NewGuid().ToString(), InstSubType = SubType.Irregular, I = 42, r = 3.1416M };
-            foreach (var formulaText in SurroundWithSpaces(new[] { "Book", "[InstSubType]", "[Inst Sub Type]", "[ Inst Sub Type ]", "I", "[r]" }))
+            foreach (var formulaText in SurroundWithSpaces(new[] { "Book", "[InstSubType]", "[Inst Sub Type]", "[ Inst Sub Type ]", "I", "[r]", "[FX Q->U]" }))
             {
                 var formula = _testee.Build(formulaText);
                 Assert.AreEqual(
-                    propertyHolder.GetType().GetProperty(formulaText.Trim('[', ' ', ']', '\t').Replace(" ", string.Empty)).GetValue(propertyHolder), 
+                    propertyHolder.GetType().GetProperty(formulaText.Trim('[', ' ', ']', '\t').Replace(" ", string.Empty).Replace("->", "_char_45__char_62_")).GetValue(propertyHolder), 
                     formula.Apply(propertyHolder), 
                     $"Formula text: [{formulaText}]");
             }
@@ -134,6 +134,9 @@ namespace FormulaParser.Tests
         {
             foreach (var functionCall in new[]
                 {
+                  // Unknown function
+                  new { FormulaText = "|MissingFunc|(|100|)|", ExpectedExceptionText = "Unknown function: 'MissingFunc'" },
+
                   // Incorrect number of parameters.
                    new { FormulaText = "|f|(|100|)|", ExpectedExceptionText = "Function f expects 0 parameters, 1 provided" },
                    new { FormulaText = "|bar|(|'qwerty'|)|", ExpectedExceptionText = "Function bar expects 2 parameters, 1 provided" },
@@ -432,7 +435,7 @@ if ( [Prod] = 'MM',
         private FormulaBuilder _testee;
 
         private static readonly PropertyHolder DefaultPropertyHolder = 
-            new PropertyHolder { Book = "default-book", InstSubType = SubType.Regular, I = 42, r = 3.1416M };
+            new PropertyHolder { Book = "default-book", InstSubType = SubType.Regular, I = 42, r = 3.1416M, FXQ_char_45__char_62_U = "Test odd property name" };
 
         private class PropertyHolder
         {
@@ -447,6 +450,8 @@ if ( [Prod] = 'MM',
             public decimal r { [UsedImplicitly] get; set; }
             // ReSharper enable InconsistentNaming
             #pragma warning restore IDE1006 // Naming Styles
+
+            public string FXQ_char_45__char_62_U { [UsedImplicitly] get; set; }
 
             public static bool TryGetPropertyType(string propertyName, out Type propertyType)
             {

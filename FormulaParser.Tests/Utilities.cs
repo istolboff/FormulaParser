@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using JetBrains.Annotations;
-using Pure = System.Diagnostics.Contracts.PureAttribute;
 
 namespace FormulaParser.Tests
 {
@@ -84,6 +83,7 @@ namespace FormulaParser.Tests
         public TResult Fold<TResult>(Func<TLeft, TResult> getFromLeft, Func<TRight, TResult> getFromRight) =>
             _isLeft ? getFromLeft(_left) : getFromRight(_right);
 
+        [UsedImplicitly]
         public void Fold(Action<TLeft> processLeft, Action<TRight> processRight)
         {
             if (_isLeft)
