@@ -375,6 +375,17 @@ namespace FormulaParser.Tests
             }
         }
 
+        [TestMethod]
+        public void ThenItShouldCorrectlyParseFormulasWithAggregatedExpressionsMixedWithNonAggregatedOnes()
+        {
+            Assert.Fail("[FX Q->U] + [first:FX Q->U]");
+            Assert.Fail("[last:r] / [FX Q->U]");
+            Assert.Fail("r + I * [first:r] + [last:I]"); // !!!!!
+            Assert.Fail("If(len([FX Q->U]) > sum([all:r + len([FX Q->U])]), max([all:I], r)");
+            Assert.Fail("sum([all: (I + r) / 100])");
+            Assert.Fail("max([all: If(I < r, Book, [FX Q->U])])");
+        }
+
         [TestMethod, Ignore]
         public void ThenItShouldCorrectlyParseComplexFormulas()
         {

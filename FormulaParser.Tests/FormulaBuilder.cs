@@ -56,16 +56,38 @@ namespace FormulaParser.Tests
                                    from property in name.Try(tryGetPropertyTypeByName, n => $"Unknown property: '{n}'").StopParsingIfFailed()
                                    select new ValueCalculator(property, Expression.Property(_formulaParameter, name));
 
+            var aggregatableExpression = CreateFormulaParser(literal, propertyAccessor, tryGetFunctionByName);
+
+            var aggregatedPropertyAccessor = from openingBracket in TextInput.Lexem("[")
+                                             from accessorType in TextInput.Lexem("all", "first", "last")
+                                             from colon in TextInput.Lexem(":")
+                                             from calculator in aggregatableExpression
+                                             from closingBraket in TextInput.Lexem("]")
+                                             select calculator;
+
+            _formulaTextParser = CreateFormulaParser(
+                literal,
+                aggregatedPropertyAccessor.Or(propertyAccessor),
+                tryGetFunctionByName);
+        }
+
+        private static Parser<ValueCalculator> CreateFormulaParser(
+            Parser<ValueCalculator> literal,
+            Parser<ValueCalculator> propertyAccessor,
+            TryParse<MethodInfo> tryGetFunctionByName)
+        {
+            Parser<ValueCalculator> resultingParser = null;
+
             var parameterList = from openingBrace in TextInput.Lexem("(")
-                                from arguments in Optional(UniformList(_formulaTextParser, TextInput.Lexem(",")))
+                                from arguments in Optional(UniformList(resultingParser, TextInput.Lexem(",")))
                                 from closingBrace in TextInput.Lexem(")")
                                 select arguments.Map(a => a.Elements).OrElse(Enumerable.Empty<ValueCalculator>());
 
             TryParse<Maybe<MethodInfo>> tryGetFunctionOrConditionExpressionByName = (string name, out Maybe<MethodInfo> result) =>
-                {
-                    result = tryGetFunctionByName(name, out var methodInfo) ? Some(methodInfo) : None;
-                    return result.Map(_ => true).OrElse(name == "Iif" || name == "If");
-                };
+            {
+                result = tryGetFunctionByName(name, out var methodInfo) ? Some(methodInfo) : None;
+                return result.Map(_ => true).OrElse(name == "Iif" || name == "If");
+            };
 
             var functionCall = from functionName in TextInput.Identifier
                                from parameters in parameterList
@@ -80,7 +102,7 @@ namespace FormulaParser.Tests
                                              .OrElse(() => Expression.Condition(arguments[0], arguments[1], arguments[2])));
 
             var bracedExpression = from openingBrace in TextInput.Lexem("(")
-                                   from internalExpression in _formulaTextParser
+                                   from internalExpression in resultingParser
                                    from closingBrace in TextInput.Lexem(")")
                                    select internalExpression;
 
@@ -88,6 +110,14 @@ namespace FormulaParser.Tests
                              from valueCalculator in literal.Or(bracedExpression).Or(functionCall).Or(propertyAccessor)
                              from adjustedCalculator in AsParser(valueCalculator.TryGiveSign(optionalSign.OrElse(string.Empty)))
                              select adjustedCalculator;
+
+            resultingParser = CreateFormulaParserCore(multiplier);
+
+            return resultingParser;
+        }
+
+        private static Parser<ValueCalculator> CreateFormulaParserCore(Parser<ValueCalculator> multiplier)
+        {
             var addend = ArithmeticExpressionParser(multiplier, "*", "/", "%");
             var comparableExpression = ArithmeticExpressionParser(addend, "+", "-");
             var equatableExpression = ArithmeticExpressionParser(comparableExpression, "<", "<=", ">", ">=");
@@ -96,7 +126,7 @@ namespace FormulaParser.Tests
             var bitwiseOrableExpression = ArithmeticExpressionParser(bitwiseXorableExpression, "^");
             var logicalAndableExpression = ArithmeticExpressionParser(bitwiseOrableExpression, "|");
             var logicalOrableExpression = ArithmeticExpressionParser(logicalAndableExpression, "&&");
-            _formulaTextParser = ArithmeticExpressionParser(logicalOrableExpression, "||");
+            return ArithmeticExpressionParser(logicalOrableExpression, "||");
         }
 
         public Formula Build(string formulaText)
@@ -108,7 +138,7 @@ namespace FormulaParser.Tests
                         parsingErrors => throw parsingErrors.AsException(formulaText));
         }
 
-        private Parser<Expression[]> MakeFunctionCallArguments(
+        private static Parser<Expression[]> MakeFunctionCallArguments(
             MethodInfo methodInfo, 
             IReadOnlyCollection<ValueCalculator> parameterCalculators)
         {
