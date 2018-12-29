@@ -1,12 +1,29 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using JetBrains.Annotations;
 
 namespace FormulaParser.Tests
 {
+    public static class FormuaTextUtilities
+    {
+        public static IEnumerable<string> InsertSpacesIntoFormula(string formulaText)
+        {
+            foreach (var space in new[] { string.Empty, " ", "\t" })
+            {
+                yield return string.Join(space, formulaText.Split('|')).Replace("~or~", "||");
+            }
+        }
+    }
+
     public static class CollectionExtensions
     {
+        public static bool HasMoreThanOneElement<T>(this IEnumerable<T> @this)
+        {
+            return @this.Skip(1).Any();
+        }
+
         public static IReadOnlyCollection<T> Concatenate<T>(T head, IReadOnlyCollection<T> tail)
         {
             if (tail is IList<T> list)
@@ -183,5 +200,129 @@ namespace FormulaParser.Tests
         }
 
         public readonly TRight Right;
+    }
+
+    public static class ReadOnlyList
+    {
+        public static ReadOnlyList<T> Create<T>(T value)
+        {
+            return new ReadOnlyList<T>.RegularList(value);
+        }
+    }
+
+    public abstract class ReadOnlyList<T> : IReadOnlyCollection<T>
+    {
+        protected ReadOnlyList(int count)
+        {
+            Count = count;
+        }
+
+        public int Count { get; }
+
+        public abstract ReadOnlyList<T> PushFront(T value);
+
+        public abstract ReadOnlyList<T> Append(ReadOnlyList<T> tail);
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            var enumerationContinuations = new Stack<ReadOnlyList<T>>();
+
+            for (var currentNode = this; currentNode != null;)
+            {
+                switch (currentNode)
+                {
+                    case NilList unused:
+                        yield break;
+
+                    case RegularList regularList:
+                        yield return regularList.Value;
+                        currentNode = regularList.Next;
+                        break;
+
+                    case CombinedList combinedList:
+                        enumerationContinuations.Push(combinedList.Tail);
+                        currentNode = combinedList.Head;
+                        break;
+                }
+
+                if (currentNode == null && enumerationContinuations.Any())
+                {
+                    currentNode = enumerationContinuations.Pop();
+                }
+            }
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+
+        public static readonly ReadOnlyList<T> Nil = new NilList();
+
+        private class NilList : ReadOnlyList<T>
+        {
+            public NilList()
+                : base(0)
+            {
+            }
+
+            public override ReadOnlyList<T> PushFront(T value)
+            {
+                return new RegularList(value);
+            }
+
+            public override ReadOnlyList<T> Append(ReadOnlyList<T> tail)
+            {
+                return tail;
+            }
+        }
+
+        internal class RegularList : ReadOnlyList<T>
+        {
+            public RegularList(T value, ReadOnlyList<T> next = null)
+                : base((next?.Count ?? 0) + 1)
+            {
+                Value = value;
+                Next = next;
+            }
+
+            public T Value { get; }
+
+            public ReadOnlyList<T> Next { get; }
+
+            public override ReadOnlyList<T> PushFront(T value)
+            {
+                return new RegularList(value, this);
+            }
+
+            public override ReadOnlyList<T> Append(ReadOnlyList<T> tail)
+            {
+                return Count == 1 ? tail.PushFront(Value) : new CombinedList(this, tail);
+            }
+        }
+
+        private class CombinedList : ReadOnlyList<T>
+        {
+            public CombinedList(ReadOnlyList<T> head, ReadOnlyList<T> tail)
+                : base(head.Count + tail.Count)
+            {
+                Head = head;
+                Tail = tail;
+            }
+
+            public ReadOnlyList<T> Head { get; }
+
+            public ReadOnlyList<T> Tail { get; }
+
+            public override ReadOnlyList<T> PushFront(T value)
+            {
+                return new CombinedList(Head.PushFront(value), Tail);
+            }
+
+            public override ReadOnlyList<T> Append(ReadOnlyList<T> tail)
+            {
+                return new CombinedList(Head, new CombinedList(Tail, tail));
+            }
+        }
     }
 }

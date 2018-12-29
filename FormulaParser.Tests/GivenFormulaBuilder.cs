@@ -5,16 +5,17 @@ using System.Reflection;
 using System.Globalization;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using JetBrains.Annotations;
+using static FormulaParser.Tests.FormuaTextUtilities;
 
 namespace FormulaParser.Tests
 {
     [TestClass]
-    public class SimpleTests
+    public class GivenFormulaBuilder
     {
         [TestInitialize]
         public void Setup()
         {
-            _testee = new FormulaBuilder(typeof(PropertyHolder), PropertyHolder.TryGetPropertyType, StockFunctions.TryGetFunction);
+            _testee = new RowFormulaBuilder(typeof(PropertyHolder), PropertyHolder.TryGetPropertyType, StockFunctions.TryGetFunction);
         }
 
         [TestMethod]
@@ -23,7 +24,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "0", "1", "-1", (int.MinValue + 1).ToString(), int.MaxValue.ToString() }))
             {
                 var formula = _testee.Build(formulaText);
-                Assert.AreEqual(int.Parse(formulaText), (int)formula.Apply(), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(int.Parse(formulaText), (int)formula.Apply(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -33,7 +34,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "1.0", "-1.0", decimal.MinValue.ToString(CultureInfo.InvariantCulture), decimal.MaxValue.ToString(CultureInfo.InvariantCulture) }))
             {
                 var formula = _testee.Build(formulaText);
-                Assert.AreEqual(decimal.Parse(formulaText), (decimal)formula.Apply(), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(decimal.Parse(formulaText), (decimal)formula.Apply(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -43,7 +44,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "'2018-12-10 10:47:03Z'", "'2018-12-10 10:47:03'" }))
             {
                 var formula = _testee.Build(formulaText);
-                Assert.AreEqual(DateTime.Parse(formulaText.Trim(' ', '\t', '\'')), (DateTime)formula.Apply(), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(DateTime.Parse(formulaText.Trim(' ', '\t', '\'')), (DateTime)formula.Apply(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -53,7 +54,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "", " ", @"\'", @"   \'     ", "f", "Ö", "hello!", @"f-w\'ggh\'ffjfjfjf\'ggg" }))
             {
                 var formula = _testee.Build($"'{formulaText}'");
-                Assert.AreEqual(formulaText.Replace(@"\'", "'"), (string)formula.Apply(), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(formulaText.Replace(@"\'", "'"), (string)formula.Apply(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -66,7 +67,7 @@ namespace FormulaParser.Tests
                 var formula = _testee.Build(formulaText);
                 Assert.AreEqual(
                     propertyHolder.GetType().GetProperty(formulaText.Trim('[', ' ', ']', '\t').Replace(" ", string.Empty).Replace("->", "_char_45__char_62_")).GetValue(propertyHolder), 
-                    formula.Apply(propertyHolder), 
+                    formula.Apply(propertyHolder, null), 
                     $"Formula text: [{formulaText}]");
             }
         }
@@ -123,7 +124,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         functionCall.ExpectedResult,
-                        formula.Apply(DefaultPropertyHolder),
+                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })),
                         $"Formula text: [{formulaTextWithSpaces}]");
                 }
             }
@@ -189,7 +190,10 @@ namespace FormulaParser.Tests
                 foreach (var formulaTextWithSpaces in InsertSpacesIntoFormula(invocation.FormulaText))
                 {
                     var formula = _testee.Build(formulaTextWithSpaces);
-                    Assert.AreEqual(invocation.ExpectedResult, formula.Apply(DefaultPropertyHolder), $"Formula text: {formulaTextWithSpaces}");
+                    Assert.AreEqual(
+                        invocation.ExpectedResult, 
+                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        $"Formula text: {formulaTextWithSpaces}");
                 }
             }
         }
@@ -216,7 +220,10 @@ namespace FormulaParser.Tests
                 foreach (var formulaTextWithSpaces in InsertSpacesIntoFormula(invocation.FormulaText))
                 {
                     var formula = _testee.Build(formulaTextWithSpaces);
-                    Assert.AreEqual(invocation.ExpectedResult, formula.Apply(DefaultPropertyHolder), $"Formula text: {formulaTextWithSpaces}");
+                    Assert.AreEqual(
+                        invocation.ExpectedResult, 
+                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        $"Formula text: {formulaTextWithSpaces}");
                 }
             }
         }
@@ -273,7 +280,10 @@ namespace FormulaParser.Tests
                 foreach (var formulaTextWithSpaces in InsertSpacesIntoFormula(comparisons.FormulaText))
                 {
                     var formula = _testee.Build(formulaTextWithSpaces);
-                    Assert.AreEqual(comparisons.ExpectedResult, formula.Apply(DefaultPropertyHolder), $"Formula text: {formulaTextWithSpaces}");
+                    Assert.AreEqual(
+                        comparisons.ExpectedResult, 
+                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        $"Formula text: {formulaTextWithSpaces}");
                 }
             }
         }
@@ -324,7 +334,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         booleanFormula.ExpectedResult, 
-                        formula.Apply(DefaultPropertyHolder), 
+                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
                         $"Formula text: {formulaTextWithSpaces}, Expression built: {formula}");
                 }
             }
@@ -346,7 +356,7 @@ namespace FormulaParser.Tests
                 var formula = _testee.Build(ifFormula.FormulaText);
                 Assert.AreEqual(
                     ifFormula.ExpectedResult,
-                    formula.Apply(propertyHolder),
+                    formula.Apply(propertyHolder, null),
                     $"Formula text: {ifFormula.FormulaText}, Expression built: {formula}");
             }
         }
@@ -369,62 +379,9 @@ namespace FormulaParser.Tests
                     var builtFormula = _testee.Build(formulaText);
                     Assert.AreEqual(
                         formula.ExpectedResult,
-                        builtFormula.Apply(DefaultPropertyHolder),
+                        builtFormula.Apply(DefaultPropertyHolder, builtFormula.CalculateAggregates(new[] { DefaultPropertyHolder })),
                         $"Formula text: {formulaText}, Expression built: {builtFormula}");
                 }
-            }
-        }
-
-        [TestMethod]
-        public void ThenItShouldCorrectlyParseFormulasWithAggregatedExpressionsMixedWithNonAggregatedOnes()
-        {
-            Assert.Fail("[FX Q->U] + [first:FX Q->U]");
-            Assert.Fail("[last:r] / [FX Q->U]");
-            Assert.Fail("r + I * [first:r] + [last:I]"); // !!!!!
-            Assert.Fail("If(len([FX Q->U]) > sum([all:r + len([FX Q->U])]), max([all:I], r)");
-            Assert.Fail("sum([all: (I + r) / 100])");
-            Assert.Fail("max([all: If(I < r, Book, [FX Q->U])])");
-        }
-
-        [TestMethod, Ignore]
-        public void ThenItShouldCorrectlyParseComplexFormulas()
-        {
-            foreach (var formulaData in new[] 
-                {
-                    new
-                    {
-                        FormulaText =
-@"
-if ( [Prod] = 'MM',
-	if(  ([Quantity] =0) || (sum ([all:Quantity]) = [first:Quantity]) ,
-		0,
-		-sum( [all:Quantity] ) / (max([Days],1) * [first:Quantity] /365 )
-	),
-	if ( [vsBase] = 'USD',
-		if ( [Instrument] = 'USD', 0 , [Swap Rate] ),
-		if ( [vsBase] = 'RUB',
-			if ( [Instrument] = 'RUB',   [Wgt Rate RUB std] , 
-				( (1+[Wgt Rate RUB std]/365) * (1+[Swap Rate]/365) - 1) * 365 
-			),
-			if ( [vsBase] = 'EUR',
-				if ( [Instrument] = 'EUR',   [Wgt Rate EUR std] , 
-					( (1+[Wgt Rate EUR std]/365) * (1+[Swap Rate]/365) - 1) * 365 
-				),
-				999
-			)
-		)
-	)
-",
-                        ExpectedResult = (object)0
-                    }
-                })
-            {
-                var formula = _testee.Build(formulaData.FormulaText);
-                Assert.AreEqual(
-                    formulaData.ExpectedResult,
-                    formula.Apply(DefaultPropertyHolder),
-                    $"Formula text: {formulaData.FormulaText}, Expression built: {formula}");
-
             }
         }
 
@@ -435,19 +392,13 @@ if ( [Prod] = 'MM',
                    select sorroundedWithSpaces;
         }
 
-        private static IEnumerable<string> InsertSpacesIntoFormula(string formulaText)
-        {
-            foreach (var space in new[] { string.Empty, " ", "\t" })
-            {
-                yield return string.Join(space, formulaText.Split('|')).Replace("~or~", "||");
-            }
-        }
-
-        private FormulaBuilder _testee;
+        private RowFormulaBuilder _testee;
 
         private static readonly PropertyHolder DefaultPropertyHolder = 
             new PropertyHolder { Book = "default-book", InstSubType = SubType.Regular, I = 42, r = 3.1416M, FXQ_char_45__char_62_U = "Test odd property name" };
 
+#pragma warning disable IDE1006 // Naming Styles
+// ReSharper disable InconsistentNaming
         private class PropertyHolder
         {
             public string Book { get; set; }
@@ -456,11 +407,7 @@ if ( [Prod] = 'MM',
 
             public int I { get; set; }
 
-            #pragma warning disable IDE1006 // Naming Styles
-            // ReSharper disable InconsistentNaming
             public decimal r { [UsedImplicitly] get; set; }
-            // ReSharper enable InconsistentNaming
-            #pragma warning restore IDE1006 // Naming Styles
 
             public string FXQ_char_45__char_62_U { [UsedImplicitly] get; set; }
 
@@ -471,23 +418,19 @@ if ( [Prod] = 'MM',
                 return propertyInfo != null;
             }
         }
+// ReSharper enable InconsistentNaming
+#pragma warning restore IDE1006 // Naming Styles
 
+#pragma warning disable IDE1006 // Naming Styles
+        // ReSharper disable InconsistentNaming
         private static class StockFunctions
         {
-            #pragma warning disable IDE1006 // Naming Styles
-            // ReSharper disable InconsistentNaming
             public static int f()
-            // ReSharper enable InconsistentNaming
-            #pragma warning restore IDE1006 // Naming Styles
             {
                 return 42;
             }
 
-            #pragma warning disable IDE1006 // Naming Styles
-            // ReSharper disable InconsistentNaming
             public static decimal foo(int v)
-            // ReSharper ensable InconsistentNaming
-            #pragma warning restore IDE1006 // Naming Styles
             {
                 switch (v)
                 {
@@ -501,11 +444,7 @@ if ( [Prod] = 'MM',
                 
             }
 
-            #pragma warning disable IDE1006 // Naming Styles
-            // ReSharper disable InconsistentNaming
             public static string bar(string left, string right)
-            // ReSharper enable InconsistentNaming
-            #pragma warning restore IDE1006 // Naming Styles
             {
                 return $"{left}=={right}";
             }
@@ -524,4 +463,6 @@ if ( [Prod] = 'MM',
 
         enum SubType { Irregular = 785, Regular = 968 }
     }
+// ReSharper enable InconsistentNaming
+#pragma warning restore IDE1006 // Naming Styles
 }

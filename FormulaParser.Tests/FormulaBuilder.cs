@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -8,34 +9,55 @@ using static FormulaParser.Tests.Maybe;
 using static FormulaParser.Tests.Either;
 using static FormulaParser.Tests.CollectionExtensions;
 using static FormulaParser.Tests.ParserExtensions;
+using AggregatedValues = System.Collections.Generic.IDictionary<string, object>;
+using AggregatedValueCalculators = FormulaParser.Tests.ReadOnlyList<System.Collections.Generic.KeyValuePair<string, System.Linq.Expressions.Expression>>;
 
 namespace FormulaParser.Tests
 {
-    public sealed class Formula
+    public sealed class ColumnFormula
     {
-        public Formula(ValueCalculator valueCalculator, ParameterExpression formulaParameter)
+        internal ColumnFormula(
+            ValueCalculator valueCalculator, 
+            FormulaExpressionsCompiler formulaExpressionsCompiler)
         {
-            _delegate = Expression.Lambda(valueCalculator.CalculateExpression, formulaParameter).Compile();
+            _singleRowCalculator = formulaExpressionsCompiler.CompileSingleRowCalculator(valueCalculator);
+            _aggregatedValueCalculators = formulaExpressionsCompiler.CompileAggregatedValuesCalculators(valueCalculator);
             _expressionText = valueCalculator.ToString();
         }
 
-        public object Apply(object parameter = null) => 
-            _delegate.DynamicInvoke(parameter);
+        public AggregatedValues CalculateAggregates(IEnumerable rows)
+        {
+            var result = new Dictionary<string, object>();
+            foreach (var aggregatedValueCalculator in _aggregatedValueCalculators)
+            {
+                if (!result.ContainsKey(aggregatedValueCalculator.Key))
+                {
+                    result.Add(aggregatedValueCalculator.Key, aggregatedValueCalculator.Value.DynamicInvoke(result, rows));
+                }
+            }
+
+            return result;
+        }
+
+        public object Apply(object row, AggregatedValues aggregatedValues) =>
+            _singleRowCalculator.DynamicInvoke(row, aggregatedValues);
 
         public override string ToString() => _expressionText;
 
-        private readonly Delegate _delegate;
+        private readonly Delegate _singleRowCalculator;
+        private readonly IReadOnlyCollection<KeyValuePair<string, Delegate>> _aggregatedValueCalculators;
         private readonly string _expressionText;
     }
 
-    public class FormulaBuilder
+    public class RowFormulaBuilder
     {
-        public FormulaBuilder(
-            Type targetType, 
+        public RowFormulaBuilder(
+            Type rowDataType, 
             TryParse<Type> tryGetPropertyTypeByName, 
             TryParse<MethodInfo> tryGetFunctionByName)
         {
-            _formulaParameter = Expression.Parameter(targetType);
+            var parameters = new FormulaParameters(rowDataType);
+            _formulaCompiler = new FormulaExpressionsCompiler(parameters);
 
             var integerLiteral = NumericLiteral(new TryParse<int>(int.TryParse));
             var decimalLiteral = NumericLiteral(new TryParse<decimal>(decimal.TryParse));
@@ -53,31 +75,51 @@ namespace FormulaParser.Tests
                                             .Select(ch => char.IsLetterOrDigit(ch) ? ch.ToString() : $"_char_{(int)ch}_"));
             var propertyName = quotedPropertyName.Or(TextInput.Identifier);
             var propertyAccessor = from name in propertyName
-                                   from property in name.Try(tryGetPropertyTypeByName, n => $"Unknown property: '{n}'").StopParsingIfFailed()
-                                   select new ValueCalculator(property, Expression.Property(_formulaParameter, name));
+                                   from propertyType in name.Try(tryGetPropertyTypeByName, n => $"Unknown property: '{n}'").StopParsingIfFailed()
+                                   select new ValueCalculator(propertyType, Expression.Property(parameters.CurrentRow, name));
 
-            var aggregatableExpression = CreateFormulaParser(literal, propertyAccessor, tryGetFunctionByName);
+            var aggregatableExpression = CreateFormulaParser(literal, propertyAccessor, tryGetFunctionByName, parameters);
 
             var aggregatedPropertyAccessor = from openingBracket in TextInput.Lexem("[")
-                                             from accessorType in TextInput.Lexem("all", "first", "last")
+                                             from aggregationMethodText in TextInput.Identifier
                                              from colon in TextInput.Lexem(":")
+                                             from aggregationMethod in aggregationMethodText.Try<AggregationMethod>(
+                                                 Enum.TryParse, 
+                                                 m => $"Invalid aggregation method {m} specified: only '" + 
+                                                      string.Join("', '", Enum.GetNames(typeof(AggregationMethod)) + 
+                                                      "' are supported"))
                                              from calculator in aggregatableExpression
                                              from closingBraket in TextInput.Lexem("]")
-                                             select calculator;
+                                             select ValueCalculator.CreateAggregatingCalculator(
+                                                 aggregationMethod,
+                                                 _formulaCompiler,
+                                                 calculator);
 
             _formulaTextParser = CreateFormulaParser(
                 literal,
                 aggregatedPropertyAccessor.Or(propertyAccessor),
-                tryGetFunctionByName);
+                tryGetFunctionByName,
+                parameters);
+        }
+
+        public ColumnFormula Build(string formulaText)
+        {
+            var parsingResult = EatTrailingSpaces(_formulaTextParser)(new TextInput(formulaText));
+            return parsingResult
+                    .GetCompleteOrElse(
+                        valueCalculator => new ColumnFormula(valueCalculator, _formulaCompiler), 
+                        parsingErrors => throw parsingErrors.AsException(formulaText));
         }
 
         private static Parser<ValueCalculator> CreateFormulaParser(
             Parser<ValueCalculator> literal,
             Parser<ValueCalculator> propertyAccessor,
-            TryParse<MethodInfo> tryGetFunctionByName)
+            TryParse<MethodInfo> tryGetFunctionByName,
+            FormulaParameters formulaParameters)
         {
             Parser<ValueCalculator> resultingParser = null;
 
+            // ReSharper disable once AccessToModifiedClosure
             var parameterList = from openingBrace in TextInput.Lexem("(")
                                 from arguments in Optional(UniformList(resultingParser, TextInput.Lexem(",")))
                                 from closingBrace in TextInput.Lexem(")")
@@ -90,17 +132,22 @@ namespace FormulaParser.Tests
             };
 
             var functionCall = from functionName in TextInput.Identifier
-                               from parameters in parameterList
+                               from lazyParameters in parameterList
                                from methodInfo in functionName.Try(tryGetFunctionOrConditionExpressionByName, n => $"Unknown function: '{n}'").StopParsingIfFailed()
+                               let parameters = lazyParameters.ToArray()
                                from arguments in methodInfo
-                                                    .Map(mi => MakeFunctionCallArguments(mi, parameters.ToArray()))
-                                                    .OrElse(() => MakeIifFunctionCallArguments(parameters.ToArray()))
+                                                    .Map(mi => MakeFunctionCallArguments(mi, parameters))
+                                                    .OrElse(() => MakeIifFunctionCallArguments(parameters))
                                                     .StopParsingIfFailed()
-                               select new ValueCalculator(
+                               select ValueCalculator.CombineCalculators(
                                    methodInfo.Map(mi => mi.ReturnType).OrElse(() => arguments[1].Type),
+                                   formulaParameters,
                                    methodInfo.Map(mi => (Expression)Expression.Call(mi, arguments))
-                                             .OrElse(() => Expression.Condition(arguments[0], arguments[1], arguments[2])));
+                                             .OrElse(() => Expression.Condition(arguments[0], arguments[1], arguments[2])),
+                                   $"{functionName}({string.Join(",", parameters.Select(c => c.CalculateExpression))})",
+                                   parameters);
 
+            // ReSharper disable once AccessToModifiedClosure
             var bracedExpression = from openingBrace in TextInput.Lexem("(")
                                    from internalExpression in resultingParser
                                    from closingBrace in TextInput.Lexem(")")
@@ -111,31 +158,24 @@ namespace FormulaParser.Tests
                              from adjustedCalculator in AsParser(valueCalculator.TryGiveSign(optionalSign.OrElse(string.Empty)))
                              select adjustedCalculator;
 
-            resultingParser = CreateFormulaParserCore(multiplier);
+            resultingParser = CreateFormulaParserCore(multiplier, formulaParameters);
 
             return resultingParser;
         }
 
-        private static Parser<ValueCalculator> CreateFormulaParserCore(Parser<ValueCalculator> multiplier)
+        private static Parser<ValueCalculator> CreateFormulaParserCore(
+            Parser<ValueCalculator> multiplier, 
+            FormulaParameters parameters)
         {
-            var addend = ArithmeticExpressionParser(multiplier, "*", "/", "%");
-            var comparableExpression = ArithmeticExpressionParser(addend, "+", "-");
-            var equatableExpression = ArithmeticExpressionParser(comparableExpression, "<", "<=", ">", ">=");
-            var bitwiseAndableExpression = ArithmeticExpressionParser(equatableExpression, "==", "!=");
-            var bitwiseXorableExpression = ArithmeticExpressionParser(bitwiseAndableExpression, "&");
-            var bitwiseOrableExpression = ArithmeticExpressionParser(bitwiseXorableExpression, "^");
-            var logicalAndableExpression = ArithmeticExpressionParser(bitwiseOrableExpression, "|");
-            var logicalOrableExpression = ArithmeticExpressionParser(logicalAndableExpression, "&&");
-            return ArithmeticExpressionParser(logicalOrableExpression, "||");
-        }
-
-        public Formula Build(string formulaText)
-        {
-            var parsingResult = EatTrailingSpaces(_formulaTextParser)(new TextInput(formulaText));
-            return parsingResult
-                    .GetCompleteOrElse(
-                        valueCalculator => new Formula(valueCalculator, _formulaParameter), 
-                        parsingErrors => throw parsingErrors.AsException(formulaText));
+            var addend = ArithmeticExpressionParser(multiplier, parameters, "*", "/", "%");
+            var comparableExpression = ArithmeticExpressionParser(addend, parameters, "+", "-");
+            var equatableExpression = ArithmeticExpressionParser(comparableExpression, parameters, "<", "<=", ">", ">=");
+            var bitwiseAndableExpression = ArithmeticExpressionParser(equatableExpression, parameters, "==", "!=");
+            var bitwiseXorableExpression = ArithmeticExpressionParser(bitwiseAndableExpression, parameters, "&");
+            var bitwiseOrableExpression = ArithmeticExpressionParser(bitwiseXorableExpression, parameters, "^");
+            var logicalAndableExpression = ArithmeticExpressionParser(bitwiseOrableExpression, parameters, "|");
+            var logicalOrableExpression = ArithmeticExpressionParser(logicalAndableExpression, parameters, "&&");
+            return ArithmeticExpressionParser(logicalOrableExpression, parameters, "||");
         }
 
         private static Parser<Expression[]> MakeFunctionCallArguments(
@@ -208,19 +248,22 @@ namespace FormulaParser.Tests
 
         private static Parser<ValueCalculator> ArithmeticExpressionParser(
             Parser<ValueCalculator> elementParser, 
+            FormulaParameters parameters,
             params string[] operationLexems) 
             => 
             from elements in UniformList(elementParser, TextInput.Operator(operationLexems))
-            from combinedCalculator in FoldBinaryOperatorsList(elements).StopParsingIfFailed()
+            from combinedCalculator in FoldBinaryOperatorsList(elements, parameters).StopParsingIfFailed()
             select combinedCalculator;
 
-        private static Parser<ValueCalculator> FoldBinaryOperatorsList(ParsedUniformList<ValueCalculator, string> operands) => 
+        private static Parser<ValueCalculator> FoldBinaryOperatorsList(
+            ParsedUniformList<ValueCalculator, string> operands, 
+            FormulaParameters parameters) => 
             operands
                 .TailPairs
                 .Aggregate(
                     Right<ParsingError, ValueCalculator>(operands.FirstElement), 
                     (valueCalculatorOrError, pair) =>
-                        valueCalculatorOrError.FlatMap(calculator => calculator.TryToApplyBinaryOperator(pair.Link, pair.Right)))
+                        valueCalculatorOrError.FlatMap(calculator => calculator.TryToApplyBinaryOperator(pair.Link, pair.Right, parameters)))
                 .Fold(
                     error => Failure<ValueCalculator>(textInput => textInput.MakeErrors(error, null)), 
                     Success);
@@ -240,21 +283,118 @@ namespace FormulaParser.Tests
             from trailingSpaces in TextInput.Repeat(char.IsWhiteSpace)
             select result;
 
+        private readonly FormulaExpressionsCompiler _formulaCompiler;
         private readonly Parser<ValueCalculator> _formulaTextParser;
-        private readonly ParameterExpression _formulaParameter;
     }
 
-    public readonly struct ValueCalculator
+    internal readonly struct FormulaParameters
     {
-        public ValueCalculator(Type resultType, Expression calculateExpression)
+        public FormulaParameters(Type rowDataType)
+        {
+            RowDataType = rowDataType;
+            AllRows = Expression.Parameter(typeof(IEnumerable<>).MakeGenericType(rowDataType));
+            CurrentRow = Expression.Parameter(rowDataType);
+            AggregatedValues = Expression.Parameter(typeof(AggregatedValues));
+        }
+
+        public Type RowDataType { get; }
+
+        public ParameterExpression AllRows { get; }
+
+        public ParameterExpression CurrentRow { get; }
+
+        public ParameterExpression AggregatedValues { get; }
+    }
+
+    internal sealed class FormulaExpressionsCompiler
+    {
+        public FormulaExpressionsCompiler(FormulaParameters formulaParameters)
+        {
+            Parameters = formulaParameters;
+        }
+
+        public FormulaParameters Parameters { get; }
+
+        public Delegate CompileSingleRowCalculator(ValueCalculator valueCalculator)
+        {
+            return Expression.Lambda(valueCalculator.CalculateExpression, Parameters.CurrentRow, Parameters.AggregatedValues).Compile();
+        }
+
+        public IReadOnlyCollection<KeyValuePair<string, Delegate>> CompileAggregatedValuesCalculators(ValueCalculator valueCalculator)
+        {
+            var reversedCalculators = new List<KeyValuePair<string, Expression>>(valueCalculator.AggregatedValuesCalculators);
+            reversedCalculators.Reverse();
+
+            var calculatorsReturningEnumerablesThatAreUsedSeveralTimes = reversedCalculators
+                .Where(item => item.Value.Type != typeof(string) && typeof(IEnumerable).IsAssignableFrom(item.Value.Type))
+                .GroupBy(item => item.Key)
+                .Where(item => item.HasMoreThanOneElement())
+                .Select(item => item.Key)
+                .ToArray();
+
+            var result = new List<KeyValuePair<string, Delegate>>();
+            var addedCalculators = new HashSet<string>();
+            foreach (var calculatorInfo in reversedCalculators)
+            {
+                if (addedCalculators.Contains(calculatorInfo.Key))
+                {
+                    continue;
+                }
+
+                var expression = calculatorsReturningEnumerablesThatAreUsedSeveralTimes.Contains(calculatorInfo.Key)
+                        ? CallToArray(calculatorInfo.Value)
+                        : calculatorInfo.Value;
+
+                result.Add(KeyValuePair.Create(
+                    calculatorInfo.Key,
+                    Expression.Lambda(expression, Parameters.AggregatedValues, Parameters.AllRows).Compile()));
+            }
+
+            return result;
+        }
+
+        public Delegate CompileSelector(Expression selectorExpression)
+        {
+            return Expression.Lambda(selectorExpression, Parameters.CurrentRow).Compile();
+        }
+
+        private static Expression CallToArray(Expression expression)
+        {
+            bool IsGenericIEnumerable(Type t) => t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IEnumerable<>);
+
+            var enumerableType = IsGenericIEnumerable(expression.Type)
+                ? expression.Type
+                : expression.Type.GetInterfaces().Single(IsGenericIEnumerable);
+
+            var enumeratedType = enumerableType.GetGenericArguments().Single();
+
+            var toArrayMethodInfo = typeof(Enumerable)
+                .GetMethod("ToArray", BindingFlags.Public | BindingFlags.Static)
+                .MakeGenericMethod(enumeratedType);
+
+            return Expression.Call(toArrayMethodInfo, expression);
+        }
+    }
+
+    internal readonly struct ValueCalculator
+    {
+        public ValueCalculator(
+            Type resultType, 
+            Expression calculateExpression,
+            AggregatedValueCalculators aggregatedValueCalculators = null,
+            bool canBeAggregated = false)
         {
             ResultType = resultType;
             CalculateExpression = calculateExpression;
+            AggregatedValuesCalculators = aggregatedValueCalculators ?? AggregatedValueCalculators.Nil;
+            _canBeAggregated = canBeAggregated;
         }
 
         public readonly Type ResultType;
 
         public readonly Expression CalculateExpression;
+
+        public readonly AggregatedValueCalculators AggregatedValuesCalculators;
 
         public Either<ParsingError, ValueCalculator> TryCastTo(Type type)
         {
@@ -263,7 +403,11 @@ namespace FormulaParser.Tests
                 return Right(
                     ResultType == type
                         ? this
-                        : new ValueCalculator(type, Expression.Convert(CalculateExpression, type)));
+                        : new ValueCalculator(
+                            type, 
+                            Expression.Convert(CalculateExpression, type),
+                            AggregatedValuesCalculators,
+                            _canBeAggregated));
             }
             catch (InvalidOperationException exception)
             {
@@ -271,7 +415,10 @@ namespace FormulaParser.Tests
             }
         }
 
-        public Either<ParsingError, ValueCalculator> TryToApplyBinaryOperator(string operatorChars, ValueCalculator secondArgument)
+        public Either<ParsingError, ValueCalculator> TryToApplyBinaryOperator(
+            string operatorChars, 
+            ValueCalculator secondArgument,
+            FormulaParameters parameters)
         {
             if ((operatorChars == "&&" || operatorChars == "||") && 
                 (ResultType != typeof(bool) || secondArgument.ResultType != typeof(bool)))
@@ -284,9 +431,13 @@ namespace FormulaParser.Tests
             if (ResultType == secondArgument.ResultType)
             {
                 return Right(
-                    new ValueCalculator(
+                    CombineCalculators(
                         op.ResultIsBoolean ? typeof(bool) : ResultType,
-                        op.Expression(CalculateExpression, secondArgument.CalculateExpression)));
+                        parameters,
+                        op.Expression(CalculateExpression, secondArgument.CalculateExpression),
+                        $"{CalculateExpression}{operatorChars}{secondArgument.CalculateExpression}",
+                        this, 
+                        secondArgument));
             }
 
             var localThis = this;
@@ -294,16 +445,20 @@ namespace FormulaParser.Tests
                 from resultType in TryToDeduceResultingType(operatorChars, ResultType, secondArgument.ResultType)
                 from leftOperand in localThis.TryCastTo(resultType)
                 from rightOperand in secondArgument.TryCastTo(resultType)
-                select new ValueCalculator(
-                        op.ResultIsBoolean ? typeof(bool) : resultType, 
-                        op.Expression(leftOperand.CalculateExpression, rightOperand.CalculateExpression));
+                select CombineCalculators(
+                        op.ResultIsBoolean ? typeof(bool) : resultType,
+                        parameters,
+                        op.Expression(leftOperand.CalculateExpression, rightOperand.CalculateExpression),
+                        $"{leftOperand.CalculateExpression}{operatorChars}{rightOperand.CalculateExpression}",
+                        leftOperand,
+                        rightOperand);
         }
 
         public override string ToString() =>
             $"'{ResultType.Name}': {CalculateExpression}";
 
         public static ValueCalculator Constant<T>(T value) => 
-            new ValueCalculator(typeof(T), Expression.Constant(value, typeof(T)));
+            new ValueCalculator(typeof(T), Expression.Constant(value, typeof(T)), canBeAggregated: true);
 
         public static Either<ParsingError, Type> TryToDeduceResultingType(string operatorChars, Type type1, Type type2)
         {
@@ -331,10 +486,113 @@ namespace FormulaParser.Tests
                         ResultType, 
                         Expression.Multiply(
                             Expression.Constant(Convert.ChangeType(-1, ResultType), ResultType), 
-                            CalculateExpression)));
+                            CalculateExpression),
+                        AggregatedValuesCalculators,
+                        _canBeAggregated));
+        }
+
+        public static ValueCalculator CombineCalculators(
+            Type resultType,
+            FormulaParameters parameters,
+            Expression calculateExpression,
+            string aggregatedValueKey,
+            params ValueCalculator[] combinees)
+        {
+            var allAggregatedValueCalculators = combinees.Aggregate(
+                        AggregatedValueCalculators.Nil,
+                        (combinedCalculators, calculator) => combinedCalculators.Append(calculator.AggregatedValuesCalculators));
+
+            if (!combinees.All(c => c._canBeAggregated))
+            {
+                return new ValueCalculator(
+                    resultType,
+                    calculateExpression,
+                    allAggregatedValueCalculators);
+            }
+
+            var calculatedValueGetter = Expression.Convert(
+                Expression.Property(
+                    parameters.AggregatedValues,
+                    "Item",
+                    Expression.Constant(aggregatedValueKey, typeof(string))),
+                resultType);
+
+            return new ValueCalculator(
+                    resultType,
+                    calculatedValueGetter,
+                    allAggregatedValueCalculators.PushFront(KeyValuePair.Create(aggregatedValueKey, calculateExpression)),
+                    canBeAggregated: true);
+        }
+
+        public static ValueCalculator CreateAggregatingCalculator(
+            AggregationMethod aggregationMethod,
+            FormulaExpressionsCompiler formulaExpressionsCompiler,
+            ValueCalculator rowProjection)
+        {
+            var parameters = formulaExpressionsCompiler.Parameters;
+            switch (aggregationMethod)
+            {
+                case AggregationMethod.all:
+                    {
+                        // Enumerable.Select<TRowDataType>(currentRow => rowProjection(currentRow))
+                        var selectMethodInfo = typeof(Enumerable)
+                            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                            .Single(mi => mi.Name == "Select" && mi.GetParameters()[1].ParameterType.GetGenericArguments().Length == 2)
+                            .MakeGenericMethod(parameters.RowDataType, rowProjection.ResultType);
+                        var selectorFunc = formulaExpressionsCompiler.CompileSelector(rowProjection.CalculateExpression);
+                        Expression allValuesCalculator = Expression.Call(selectMethodInfo, parameters.AllRows, Expression.Constant(selectorFunc));
+                        // aggregatedValuesParameter["all:" + rowProjection.ToString()]
+                        var key = "all:" + rowProjection.CalculateExpression;
+                        var calculatedValueGetter = Expression.Convert(
+                            Expression.Property(
+                                parameters.AggregatedValues,
+                                "Item",
+                                Expression.Constant(key, typeof(string))),
+                            typeof(IEnumerable<>).MakeGenericType(rowProjection.ResultType));
+                        return new ValueCalculator(
+                            selectMethodInfo.ReturnType,
+                            calculatedValueGetter,
+                            ReadOnlyList.Create(KeyValuePair.Create(key, allValuesCalculator)),
+                            canBeAggregated: true);
+                    }
+
+                case AggregationMethod.first:
+                case AggregationMethod.last:
+                    {
+                        var allRowsCalculator = CreateAggregatingCalculator(
+                            AggregationMethod.all,
+                            formulaExpressionsCompiler,
+                            rowProjection);
+                        // Enumerable.FirstOrDefault<TRowDataType>(allProjectedRows)
+                        var methodName = aggregationMethod == AggregationMethod.first ? "FirstOrDefault" : "LastOrDefault";
+                        var firstOrLastMethodInfo = typeof(Enumerable)
+                            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                            .Single(mi => mi.Name == methodName && mi.GetParameters().Length == 1)
+                            .MakeGenericMethod(rowProjection.ResultType);
+                        Expression valueCalculator = Expression.Call(firstOrLastMethodInfo, allRowsCalculator.CalculateExpression);
+                        // aggregatedValuesParameter["first|last:" + rowProjection.ToString()]
+                        var key = $"{aggregationMethod}:{rowProjection.CalculateExpression}";
+                        var calculatedValueGetter = Expression.Convert(
+                            Expression.Property(
+                                parameters.AggregatedValues,
+                                "Item",
+                                Expression.Constant(key, typeof(string))),
+                            rowProjection.ResultType);
+                        return new ValueCalculator(
+                            firstOrLastMethodInfo.ReturnType,
+                            calculatedValueGetter,
+                            allRowsCalculator.AggregatedValuesCalculators.PushFront(KeyValuePair.Create(key, valueCalculator)),
+                            canBeAggregated: true);
+                    }
+
+                default:
+                    throw new ArgumentException($"Aggregation Method '{aggregationMethod}' is not supported.", nameof(aggregationMethod));
+            }
         }
 
         private bool IsNumeric => TypesConversionSequence.Contains(ResultType);
+
+        private readonly bool _canBeAggregated;
 
         private static readonly IReadOnlyDictionary<string, (Func<Expression, Expression, Expression> Expression, bool ResultIsBoolean)> KnownBinaryOperations = 
             new Dictionary<string, (Func<Expression, Expression, Expression>, bool)>
@@ -359,7 +617,7 @@ namespace FormulaParser.Tests
         private static readonly Type[] TypesConversionSequence = new[] { typeof(short), typeof(int), typeof(long), typeof(decimal) };
     }
 
-    public readonly struct ParsingError
+    internal readonly struct ParsingError
     {
         public ParsingError(string errorMessage)
         {
@@ -374,7 +632,7 @@ namespace FormulaParser.Tests
         private readonly string _errorMessage;
     }
 
-    public sealed class ParsingErrors 
+    internal sealed class ParsingErrors 
     {
         public ParsingErrors(string errorMessage, TextInput errorLocation)
             : this(new ParsingError(errorMessage), null, errorLocation)
@@ -418,7 +676,7 @@ namespace FormulaParser.Tests
         private readonly TextInput _errorLocation;
     }
 
-    public readonly struct TextInput
+    internal readonly struct TextInput
     {
         public TextInput(string text, int currentPosition = 0)
         {
@@ -523,7 +781,7 @@ namespace FormulaParser.Tests
         private static readonly char[] OperatorStartingCharacters = OperatorLexems.Select(op => op.First()).Distinct().ToArray();
     }
 
-    public readonly struct ParsingResult<TResult>
+    internal readonly struct ParsingResult<TResult>
     {
         public ParsingResult(TResult parsedValue, TextInput remainingInput)
             : this(Right((parsedValue, remainingInput)))
@@ -573,7 +831,7 @@ namespace FormulaParser.Tests
         private readonly Either<ParsingErrors, (TResult ParsedValue, TextInput RemainingInput)> _result;
     }
 
-    public readonly struct ParsedUniformList<TElement, TLink>
+    internal readonly struct ParsedUniformList<TElement, TLink>
     {
         public ParsedUniformList(
             TElement firstElement,
@@ -591,11 +849,15 @@ namespace FormulaParser.Tests
             new[] { FirstElement }.Concat(TailPairs.Select(pair => pair.Right));
     }
 
-    public delegate ParsingResult<TResult> Parser<TResult>(TextInput input);
+    internal delegate ParsingResult<TResult> Parser<TResult>(TextInput input);
 
     public delegate bool TryParse<T>(string s, out T result);
 
-    public static class ParserExtensions
+    // ReSharper disable InconsistentNaming
+    internal enum AggregationMethod { all, first, last }
+    // ReSharper enable InconsistentNaming
+
+    internal static class ParserExtensions
     {
         public static Parser<TResult> Success<TResult>(TResult result) =>
             textInput => new ParsingResult<TResult>(result, textInput);
