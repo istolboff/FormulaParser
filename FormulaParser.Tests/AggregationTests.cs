@@ -17,7 +17,8 @@ namespace FormulaParser.Tests
             _testee = new RowFormulaBuilder(
                 typeof(DataRow),
                 new Dictionary<string, Type> { { "I", typeof(int) }, { "D", typeof(decimal) }, { "S", typeof(string) } }.TryGetValue,
-                (string methodName, out MethodInfo result) => (result = GetType().GetMethod(methodName, BindingFlags.Static | BindingFlags.NonPublic)) != null);
+                (string methodName, out IReadOnlyCollection<MethodInfo> result) => 
+                    (result = GetType().GetMethods(BindingFlags.Static | BindingFlags.NonPublic).Where(mi => mi.Name == methodName).ToArray()).Any());
         }
 
         [TestMethod]
@@ -90,6 +91,12 @@ namespace FormulaParser.Tests
                     Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / Sum([all:CountInvocations(D)])",
                     ExpectedInvocationCount = rows.Length,
                     ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / rows.Select(r => CountInvocations(r.D)).Sum())
+                },
+                new
+                {
+                    Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / Sum([all:D])",
+                    ExpectedInvocationCount = rows.Length,
+                    ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / rows.Select(r => r.D).Sum())
                 },
             })
             {

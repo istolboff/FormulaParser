@@ -139,8 +139,8 @@ namespace FormulaParser.Tests
                   new { FormulaText = "|MissingFunc|(|100|)|", ExpectedExceptionText = "Unknown function: 'MissingFunc'" },
 
                   // Incorrect number of parameters.
-                   new { FormulaText = "|f|(|100|)|", ExpectedExceptionText = "Function f expects 0 parameters, 1 provided" },
-                   new { FormulaText = "|bar|(|'qwerty'|)|", ExpectedExceptionText = "Function bar expects 2 parameters, 1 provided" },
+                   new { FormulaText = "|f|(|100|)|", ExpectedExceptionText = "Could not find overload of function 'f' matching argument types (Int32)" },
+                   new { FormulaText = "|bar|(|'qwerty'|)|", ExpectedExceptionText = "Could not find overload of function 'bar' matching argument types (String)" },
 
                   // Incompatible argument types. 
                    new { FormulaText = "|bar|(|'qwerty'|,|100|)|", ExpectedExceptionText = "Argument of a wrong type was used for parameter 'right' of the function bar()" },
@@ -454,10 +454,9 @@ namespace FormulaParser.Tests
                 return $"{p1}\\/{p2}\\/{CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName(p3.Month)}";
             }
 
-            public static bool TryGetFunction(string methodName, out MethodInfo result)
+            public static bool TryGetFunction(string methodName, out IReadOnlyCollection<MethodInfo> result)
             {
-                result = typeof(StockFunctions).GetMethod(methodName);
-                return result != null;
+                return (result = typeof(StockFunctions).GetMethods().Where(mi => mi.Name == methodName).ToArray()).Any();
             }
         }
 

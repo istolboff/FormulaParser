@@ -54,7 +54,7 @@ namespace FormulaParser.Tests
         public RowFormulaBuilder(
             Type rowDataType, 
             TryParse<Type> tryGetPropertyTypeByName, 
-            TryParse<MethodInfo> tryGetFunctionByName)
+            TryParse<IReadOnlyCollection<MethodInfo>> tryGetFunctionByName)
         {
             var parameters = new FormulaParameters(rowDataType);
             _formulaCompiler = new FormulaExpressionsCompiler(parameters);
@@ -113,7 +113,7 @@ namespace FormulaParser.Tests
         private static Parser<ValueCalculator> CreateFormulaParser(
             Parser<ValueCalculator> literal,
             Parser<ValueCalculator> propertyAccessor,
-            TryParse<MethodInfo> tryGetFunctionByName,
+            TryParse<IReadOnlyCollection<MethodInfo>> tryGetFunctionByName,
             FormulaParameters formulaParameters)
         {
             Parser<ValueCalculator> resultingParser = null;
@@ -124,16 +124,18 @@ namespace FormulaParser.Tests
                                 from closingBrace in TextInput.Lexem(")")
                                 select arguments.Map(a => a.Elements).OrElse(Enumerable.Empty<ValueCalculator>());
 
-            TryParse<Maybe<MethodInfo>> tryGetFunctionOrConditionExpressionByName = (string name, out Maybe<MethodInfo> result) =>
-            {
-                result = tryGetFunctionByName(name, out var methodInfo) ? Some(methodInfo) : None;
-                return result.Map(_ => true).OrElse(name == "Iif" || name == "If");
-            };
+            TryParse<Maybe<IReadOnlyCollection<MethodInfo>>> tryGetFunctionOrConditionExpressionByName = 
+                (string name, out Maybe<IReadOnlyCollection<MethodInfo>> result) =>
+                {
+                    result = tryGetFunctionByName(name, out var methodInfos) ? Some(methodInfos) : None;
+                    return result.Map(_ => true).OrElse(name == "Iif" || name == "If");
+                };
 
             var functionCall = from functionName in TextInput.Identifier
                                from lazyParameters in parameterList
-                               from methodInfo in functionName.Try(tryGetFunctionOrConditionExpressionByName, n => $"Unknown function: '{n}'").StopParsingIfFailed()
+                               from methodInfos in functionName.Try(tryGetFunctionOrConditionExpressionByName, n => $"Unknown function: '{n}'").StopParsingIfFailed()
                                let parameters = lazyParameters.ToArray()
+                               from methodInfo in PickFunctionOverload(functionName, methodInfos, parameters).StopParsingIfFailed()
                                from arguments in methodInfo
                                                     .Map(mi => MakeFunctionCallArguments(mi, parameters))
                                                     .OrElse(() => MakeIifFunctionCallArguments(parameters))
@@ -175,6 +177,26 @@ namespace FormulaParser.Tests
             var logicalAndableExpression = ArithmeticExpressionParser(bitwiseOrableExpression, parameters, "|");
             var logicalOrableExpression = ArithmeticExpressionParser(logicalAndableExpression, parameters, "&&");
             return ArithmeticExpressionParser(logicalOrableExpression, parameters, "||");
+        }
+
+        private static Parser<Maybe<MethodInfo>> PickFunctionOverload(
+            string functionName,
+            Maybe<IReadOnlyCollection<MethodInfo>> methodInfos,
+            ValueCalculator[] valueCalculators)
+        {
+            return methodInfos.Map(mis =>
+                {
+                    var actualParameterTypes = valueCalculators.Select(c => c.ResultType).ToArray();
+                    var matchingMethod = mis
+                        .FirstOrDefault(mi => mi.GetParameters().Select(p => p.ParameterType).SequenceEqual(actualParameterTypes))
+                        ?? mis.FirstOrDefault(mi => mi.GetParameters().Length == actualParameterTypes.Length);
+                    return matchingMethod == null
+                        ? Failure<Maybe<MethodInfo>>(textInput => textInput.MakeErrors(
+                            $"Could not find overload of function '{functionName}' matching argument types " + 
+                            $"({string.Join(",", actualParameterTypes.Select(t => t.Name))})"))
+                        : Success(Some(matchingMethod));
+                })
+                .OrElse(Success<Maybe<MethodInfo>>(None));
         }
 
         private static Parser<Expression[]> MakeFunctionCallArguments(
