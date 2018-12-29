@@ -23,19 +23,6 @@ namespace FormulaParser.Tests
         {
             return @this.Skip(1).Any();
         }
-
-        public static IReadOnlyCollection<T> Concatenate<T>(T head, IReadOnlyCollection<T> tail)
-        {
-            if (tail is IList<T> list)
-            {
-                list.Insert(0, head);
-                return tail is IReadOnlyCollection<T> result ? result : list.ToList();
-            }
-
-            var newList = new List<T>(1 + tail.Count) { head };
-            newList.AddRange(tail);
-            return newList;
-        }
     }
 
     public readonly struct Maybe<T>

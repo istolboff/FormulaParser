@@ -79,7 +79,18 @@ namespace FormulaParser.Tests
             var rows = Enumerable.Range(0, 100).Select(i => new DataRow { I = 1000 + i, D = 3.14M * i, S = $"Item-{i}" }).ToArray();
             foreach (var formula in new[]
             {
-                new { Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / 2", ExpectedInvocationCount = rows.Length, ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / 2) },
+                new
+                {
+                    Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / 2",
+                    ExpectedInvocationCount = rows.Length,
+                    ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / 2)
+                },
+                new
+                {
+                    Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / Sum([all:CountInvocations(D)])",
+                    ExpectedInvocationCount = rows.Length,
+                    ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / rows.Select(r => CountInvocations(r.D)).Sum())
+                },
             })
             {
                 MethodCountInvocations = 0;
@@ -157,6 +168,17 @@ if ( [Prod] = 'MM',
         private static int Len(string v) => v.Length;
 
         [UsedImplicitly]
+        private static int Sum(IEnumerable<int> items)
+        {
+            return items.Sum();
+        }
+
+        [UsedImplicitly]
+        private static decimal Sum(IEnumerable<decimal> items)
+        {
+            return items.Sum();
+        }
+
         private static int CountInvocations(decimal unused)
         {
             ++MethodCountInvocations;
