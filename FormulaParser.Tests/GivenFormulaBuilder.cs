@@ -15,7 +15,7 @@ namespace FormulaParser.Tests
         [TestInitialize]
         public void Setup()
         {
-            _testee = new RowFormulaBuilder(typeof(PropertyHolder), PropertyHolder.TryGetPropertyType, StockFunctions.TryGetFunction);
+            _testee = new ColumnFormulaBuilder(typeof(PropertyHolder), PropertyHolder.TryGetPropertyType, StockFunctions.TryGetFunction);
         }
 
         [TestMethod]
@@ -24,7 +24,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "0", "1", "-1", (int.MinValue + 1).ToString(), int.MaxValue.ToString() }))
             {
                 var formula = _testee.Build(formulaText);
-                Assert.AreEqual(int.Parse(formulaText), (int)formula.Apply(null, null), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(int.Parse(formulaText), (int)formula.CalculateCellValue(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -34,7 +34,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "1.0", "-1.0", decimal.MinValue.ToString(CultureInfo.InvariantCulture), decimal.MaxValue.ToString(CultureInfo.InvariantCulture) }))
             {
                 var formula = _testee.Build(formulaText);
-                Assert.AreEqual(decimal.Parse(formulaText), (decimal)formula.Apply(null, null), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(decimal.Parse(formulaText), (decimal)formula.CalculateCellValue(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -44,7 +44,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "'2018-12-10 10:47:03Z'", "'2018-12-10 10:47:03'" }))
             {
                 var formula = _testee.Build(formulaText);
-                Assert.AreEqual(DateTime.Parse(formulaText.Trim(' ', '\t', '\'')), (DateTime)formula.Apply(null, null), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(DateTime.Parse(formulaText.Trim(' ', '\t', '\'')), (DateTime)formula.CalculateCellValue(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -54,7 +54,7 @@ namespace FormulaParser.Tests
             foreach (var formulaText in SurroundWithSpaces(new[] { "", " ", @"\'", @"   \'     ", "f", "Ö", "hello!", @"f-w\'ggh\'ffjfjfjf\'ggg" }))
             {
                 var formula = _testee.Build($"'{formulaText}'");
-                Assert.AreEqual(formulaText.Replace(@"\'", "'"), (string)formula.Apply(null, null), $"Formula text: [{formulaText}]");
+                Assert.AreEqual(formulaText.Replace(@"\'", "'"), (string)formula.CalculateCellValue(null, null), $"Formula text: [{formulaText}]");
             }
         }
 
@@ -67,7 +67,7 @@ namespace FormulaParser.Tests
                 var formula = _testee.Build(formulaText);
                 Assert.AreEqual(
                     propertyHolder.GetType().GetProperty(formulaText.Trim('[', ' ', ']', '\t').Replace(" ", string.Empty).Replace("->", "_char_45__char_62_")).GetValue(propertyHolder), 
-                    formula.Apply(propertyHolder, null), 
+                    formula.CalculateCellValue(propertyHolder, null), 
                     $"Formula text: [{formulaText}]");
             }
         }
@@ -124,7 +124,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         functionCall.ExpectedResult,
-                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })),
+                        formula.CalculateCellValue(DefaultPropertyHolder, formula.CalculateAggregatedValues(new[] { DefaultPropertyHolder })),
                         $"Formula text: [{formulaTextWithSpaces}]");
                 }
             }
@@ -192,7 +192,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         invocation.ExpectedResult, 
-                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        formula.CalculateCellValue(DefaultPropertyHolder, formula.CalculateAggregatedValues(new[] { DefaultPropertyHolder })), 
                         $"Formula text: {formulaTextWithSpaces}");
                 }
             }
@@ -222,7 +222,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         invocation.ExpectedResult, 
-                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        formula.CalculateCellValue(DefaultPropertyHolder, formula.CalculateAggregatedValues(new[] { DefaultPropertyHolder })), 
                         $"Formula text: {formulaTextWithSpaces}");
                 }
             }
@@ -282,7 +282,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         comparisons.ExpectedResult, 
-                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        formula.CalculateCellValue(DefaultPropertyHolder, formula.CalculateAggregatedValues(new[] { DefaultPropertyHolder })), 
                         $"Formula text: {formulaTextWithSpaces}");
                 }
             }
@@ -334,7 +334,7 @@ namespace FormulaParser.Tests
                     var formula = _testee.Build(formulaTextWithSpaces);
                     Assert.AreEqual(
                         booleanFormula.ExpectedResult, 
-                        formula.Apply(DefaultPropertyHolder, formula.CalculateAggregates(new[] { DefaultPropertyHolder })), 
+                        formula.CalculateCellValue(DefaultPropertyHolder, formula.CalculateAggregatedValues(new[] { DefaultPropertyHolder })), 
                         $"Formula text: {formulaTextWithSpaces}, Expression built: {formula}");
                 }
             }
@@ -356,7 +356,7 @@ namespace FormulaParser.Tests
                 var formula = _testee.Build(ifFormula.FormulaText);
                 Assert.AreEqual(
                     ifFormula.ExpectedResult,
-                    formula.Apply(propertyHolder, null),
+                    formula.CalculateCellValue(propertyHolder, null),
                     $"Formula text: {ifFormula.FormulaText}, Expression built: {formula}");
             }
         }
@@ -379,7 +379,7 @@ namespace FormulaParser.Tests
                     var builtFormula = _testee.Build(formulaText);
                     Assert.AreEqual(
                         formula.ExpectedResult,
-                        builtFormula.Apply(DefaultPropertyHolder, builtFormula.CalculateAggregates(new[] { DefaultPropertyHolder })),
+                        builtFormula.CalculateCellValue(DefaultPropertyHolder, builtFormula.CalculateAggregatedValues(new[] { DefaultPropertyHolder })),
                         $"Formula text: {formulaText}, Expression built: {builtFormula}");
                 }
             }
@@ -392,7 +392,7 @@ namespace FormulaParser.Tests
                    select sorroundedWithSpaces;
         }
 
-        private RowFormulaBuilder _testee;
+        private ColumnFormulaBuilder _testee;
 
         private static readonly PropertyHolder DefaultPropertyHolder = 
             new PropertyHolder { Book = "default-book", InstSubType = SubType.Regular, I = 42, r = 3.1416M, FXQ_char_45__char_62_U = "Test odd property name" };

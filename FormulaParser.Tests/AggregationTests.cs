@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using JetBrains.Annotations;
 using static FormulaParser.Tests.FormuaTextUtilities;
@@ -14,7 +15,7 @@ namespace FormulaParser.Tests
         [TestInitialize]
         public void Setup()
         {
-            _testee = new RowFormulaBuilder(
+            _testee = new ColumnFormulaBuilder(
                 typeof(DataRow),
                 new Dictionary<string, Type> { { "I", typeof(int) }, { "D", typeof(decimal) }, { "S", typeof(string) } }.TryGetValue,
                 (string methodName, out IReadOnlyCollection<MethodInfo> result) => 
@@ -36,10 +37,10 @@ namespace FormulaParser.Tests
                 foreach (var formulaText in InsertSpacesIntoFormula($"|[|all|:|{property.Name}|]|"))
                 {
                     var builtFormula = _testee.Build(formulaText);
-                    var calculatedAggregates = builtFormula.CalculateAggregates(rows);
+                    var calculatedAggregates = builtFormula.CalculateAggregatedValues(rows);
                     for (var i = 0; i != rows.Length; ++i)
                     {
-                        Assert.IsTrue(property.CheckResult(builtFormula.Apply(rows[i], calculatedAggregates)), $"[{formulaText}] failed for {i}");
+                        Assert.IsTrue(property.CheckResult(builtFormula.CalculateCellValue(rows[i], calculatedAggregates)), $"[{formulaText}] failed for {i}");
                     }
                 }
             }
@@ -62,12 +63,12 @@ namespace FormulaParser.Tests
                     foreach (var formulaText in InsertSpacesIntoFormula($"|[|{aggregationMethod}|:|{property.Name}|]|"))
                     {
                         var builtFormula = _testee.Build(formulaText);
-                        var calculatedAggregates = builtFormula.CalculateAggregates(rows);
+                        var calculatedAggregates = builtFormula.CalculateAggregatedValues(rows);
                         for (var i = 0; i != rows.Length; ++i)
                         {
                             Assert.AreEqual(
                                 aggregationMethod == AggregationMethod.first ? property.First : property.Last,
-                                builtFormula.Apply(rows[i], calculatedAggregates),
+                                builtFormula.CalculateCellValue(rows[i], calculatedAggregates),
                                 $"[{formulaText}] failed for {i}");
                         }
                     }
@@ -78,44 +79,83 @@ namespace FormulaParser.Tests
         public void TestCachingAggregatedEnumerables()
         {
             var rows = Enumerable.Range(0, 100).Select(i => new DataRow { I = 1000 + i, D = 3.14M * i, S = $"Item-{i}" }).ToArray();
+
             foreach (var formula in new[]
             {
                 new
                 {
                     Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / 2",
-                    ExpectedInvocationCount = rows.Length,
-                    ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / 2)
+                    ExpectedInvocationCount = GetNumberOfInvocationsRequiredToGetFirstAndLastElementsOfArrayProjection(),
+                    ExpectedResult = (object)((rows.First().D + rows.Last().D) / 2)
                 },
                 new
                 {
                     Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / Sum([all:CountInvocations(D)])",
-                    ExpectedInvocationCount = rows.Length,
-                    ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / rows.Select(r => CountInvocations(r.D)).Sum())
+                    ExpectedInvocationCount = rows.Length + 2,
+                    ExpectedResult = (object)((rows.First().D + rows.Last().D) / rows.Sum(r => r.D))
                 },
                 new
                 {
                     Text = "([first: CountInvocations(D)] + [last:CountInvocations(D)]) / Sum([all:D])",
+                    ExpectedInvocationCount = GetNumberOfInvocationsRequiredToGetFirstAndLastElementsOfArrayProjection(),
+                    ExpectedResult = (object)((rows.First().D + rows.Last().D) / rows.Sum(r => r.D))
+                },
+                new
+                {
+                    Text = "Count([all: CountInvocations(D)])",
+                    ExpectedInvocationCount = 0,
+                    ExpectedResult = (object)rows.Length
+                },
+                new
+                {
+                    Text = "(Min([all:CountInvocations(D)]) + Max([all:CountInvocations(D)]) / Count([all:CountInvocations(D + 1)])",
                     ExpectedInvocationCount = rows.Length,
-                    ExpectedResult = (object)((CountInvocations(rows.First().D) + CountInvocations(rows.Last().D)) / rows.Select(r => r.D).Sum())
+                    ExpectedResult = (object)((rows.Min(r => r.D) + rows.Max(r => r.D)) / rows.Length)
                 },
             })
             {
                 MethodCountInvocations = 0;
                 var builtFormula = _testee.Build(formula.Text);
-                var calculatedAggregates = builtFormula.CalculateAggregates(rows);
+                var calculatedAggregates = builtFormula.CalculateAggregatedValues(rows);
                 Assert.AreEqual(
                     formula.ExpectedResult, 
-                    builtFormula.Apply(rows[21], calculatedAggregates),
+                    builtFormula.CalculateCellValue(rows[21], calculatedAggregates),
                     $"Failed formula: {formula.Text}");
                 Assert.AreEqual(formula.ExpectedInvocationCount, MethodCountInvocations, $"Failed formula: {formula.Text}");
+            }
+        }
+
+        [TestMethod]
+        public void TestMixingAggrgeatedAndRowBasedCalculations()
+        {
+            var rows = Enumerable.Range(0, 100).Select(i => new DataRow { I = 1000 + i, D = 3.14M * i, S = $"Item-{new String('!', i)}" }).ToArray();
+            foreach (var formula in new[] 
+            {
+                new
+                {
+                    Text = "D + [last:I]",
+                    ExpectedExpression = "(currentRow.D + Convert(Convert(aggregatedValues.Item[\"last:currentRow.I\"], Int32), Decimal)): 'Decimal'",
+                    ExpectedResult = rows.Select(r => (object)(r.D + rows.Last().I))
+                },
+                new
+                {
+                    Text = "([first:I] + [last:I]) / 2 + D",
+                    ExpectedExpression = "(Convert(Convert(aggregatedValues.Item[\"Convert(aggregatedValues.Item[\"Convert(aggregatedValues.Item[\"first:currentRow.I\"], Int32)+Convert(aggregatedValues.Item[\"last:currentRow.I\"], Int32)\"], Int32)/2\"], Int32), Decimal) + currentRow.D): 'Decimal'",
+                    ExpectedResult = rows.Select(r => (object)((rows.First().I + rows.Last().I) / 2 + r.D))
+                }
+            })
+            {
+                var builtFormula = _testee.Build(formula.Text);
+                var calculatedAggregates = builtFormula.CalculateAggregatedValues(rows);
+                Assert.AreEqual(formula.ExpectedExpression, builtFormula.ToString());
+                Assert.IsTrue(formula.ExpectedResult.SequenceEqual(rows.Select(r => builtFormula.CalculateCellValue(r, calculatedAggregates))));
             }
         }
 
         [TestMethod, Ignore]
         public void DoNotForgetToCheckTheseCases()
         {
-            Assert.Fail("[FX Q->U] + [first:FX Q->U]");
-            Assert.Fail("[last:r] / [FX Q->U]");
+            Assert.Fail("[FX Q->U] + [first:FX Q->U]"); // spaces in identifiers
             Assert.Fail("r + I * [first:r] + [last:I]"); // !!!!!
             Assert.Fail("If(len([FX Q->U]) > sum([all:r + len([FX Q->U])]), max([all:I], r)");
             Assert.Fail("sum([all: (I + r) / 100])");
@@ -165,34 +205,36 @@ if ( [Prod] = 'MM',
                 var formula = _testee.Build(formulaData.FormulaText);
                 Assert.AreEqual(
                     formulaData.ExpectedResult,
-                    formula.Apply(new DataRow { }, null),
+                    formula.CalculateCellValue(new DataRow { }, null),
                     $"Formula text: {formulaData.FormulaText}, Expression built: {formula}");
 
             }
         }
 
+        private static int GetNumberOfInvocationsRequiredToGetFirstAndLastElementsOfArrayProjection()
+        {
+            var rows = Enumerable.Range(0, 100).ToArray();
+            MethodCountInvocations = 0;
+            var smartEnumeration = rows.Select(r => CountInvocations(r));
+            Use((smartEnumeration.First() + smartEnumeration.Last()) / 2);
+            return MethodCountInvocations;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void Use<T>([UsedImplicitly] T unused)
+        {
+        }
+
         [UsedImplicitly]
         private static int Len(string v) => v.Length;
 
-        [UsedImplicitly]
-        private static int Sum(IEnumerable<int> items)
-        {
-            return items.Sum();
-        }
-
-        [UsedImplicitly]
-        private static decimal Sum(IEnumerable<decimal> items)
-        {
-            return items.Sum();
-        }
-
-        private static int CountInvocations(decimal unused)
+        private static decimal CountInvocations(decimal unused)
         {
             ++MethodCountInvocations;
-            return (int)unused;
+            return unused;
         }
 
-        private RowFormulaBuilder _testee;
+        private ColumnFormulaBuilder _testee;
 
         private static int MethodCountInvocations;
 
